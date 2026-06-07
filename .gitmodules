@@ -7,8 +7,8 @@
 	url = https://github.com/V0lk3n/usb-can-2-module
 [submodule "KernelSU"]
 	path = KernelSU
-	url = https://github.com/Trijal08/KernelSU.git
-	branch = master-susfs
+	url = https://github.com/ReSukiSU/ReSukiSU.git
+	branch = main
 [submodule "vpnhide"]
 	path = vpnhide
 	url = https://github.com/okhsunrog/vpnhide.git
