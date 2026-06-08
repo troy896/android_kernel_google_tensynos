@@ -36,11 +36,7 @@ static const char* binder_type[] = {
 	"transaction",
 	"free_buffer_full",
 };
-static const char* rpc_type[] = {
-	"SYNC_BINDER_REPLY",
-	"SYNC_BINDER",
-	"FREE_BUFFER_FULL",
-};
+
 static struct sock* netlink_socket;
 extern struct net init_net;
 static unsigned long netlink_unit = 0;
