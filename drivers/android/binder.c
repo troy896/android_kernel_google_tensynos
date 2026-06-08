@@ -70,6 +70,9 @@
 #include <linux/android_vendor.h>
 
 #include <uapi/linux/sched/types.h>
+#ifdef CONFIG_REKERNEL
+#include <../rekernel/rekernel.h>
+#endif /* CONFIG_REKERNEL */
 #include <uapi/linux/android/binder.h>
 
 #include <linux/cacheflush.h>
@@ -3025,6 +3028,39 @@ binder_find_outdated_transaction_ilocked(struct binder_transaction *t,
 	return NULL;
 }
 
+#ifdef CONFIG_REKERNEL
+/**
+ * rekernel_binder_transaction() - Re:Kernel binder transaction handler
+ * @reply:	whether this is a reply transaction
+ * @t:		transaction
+ * @target_node:	target node
+ * @tr:		transaction data
+ */
+void rekernel_binder_transaction(bool reply, struct binder_transaction *t,
+			struct binder_node *target_node, struct binder_transaction_data *tr) {
+	struct binder_proc *to_proc;
+	struct binder_alloc *target_alloc;
+	if (!t->to_proc)
+		return;
+	to_proc = t->to_proc;
+
+	if (reply) {
+		binder_reply_handler(task_tgid_nr(current), current, to_proc->pid, to_proc->tsk, false, tr);
+	} else if (t->from) {
+		if (t->from->proc) {
+			binder_trans_handler(t->from->proc->pid, t->from->proc->tsk, to_proc->pid, to_proc->tsk, false, tr);
+		}
+	} else { // oneway=1
+		binder_trans_handler(task_tgid_nr(current), current, to_proc->pid, to_proc->tsk, true, tr);
+
+		target_alloc = &to_proc->alloc;
+		if (target_alloc->free_async_space < (target_alloc->buffer_size / 10 + 0x300)) {
+			binder_overflow_handler(task_tgid_nr(current), current, to_proc->pid, to_proc->tsk, true, tr);
+		}
+	}
+}
+#endif /* CONFIG_REKERNEL */
+
 /**
  * binder_proc_transaction() - sends a transaction to a process and wakes it up
  * @t:		transaction to send
@@ -3543,6 +3579,9 @@ static void binder_transaction(struct binder_proc *proc,
 		}
 	}
 
+#ifdef CONFIG_REKERNEL
+	rekernel_binder_transaction(reply, t, target_node, tr);
+#endif /* CONFIG_REKERNEL */
 	trace_binder_transaction(reply, t, target_node);
 
 	t->buffer = binder_alloc_new_buf(&target_proc->alloc, tr->data_size,
