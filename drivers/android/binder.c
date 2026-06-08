@@ -2989,8 +2989,12 @@ static int binder_fixup_parent(struct list_head *pf_head,
 static bool binder_can_update_transaction(struct binder_transaction *t1,
 					  struct binder_transaction *t2)
 {
+#ifdef CONFIG_REKERNEL
+	if ((t1->flags & t2->flags & TF_ONE_WAY) != TF_ONE_WAY || !t1->to_proc || !t2->to_proc)
+#else
 	if ((t1->flags & t2->flags & (TF_ONE_WAY | TF_UPDATE_TXN)) !=
 	    (TF_ONE_WAY | TF_UPDATE_TXN) || !t1->to_proc || !t2->to_proc)
+#endif /* CONFIG_REKERNEL */
 		return false;
 	if (t1->to_proc->tsk == t2->to_proc->tsk && t1->code == t2->code &&
 	    t1->flags == t2->flags && t1->buffer->pid == t2->buffer->pid &&
@@ -3133,7 +3137,11 @@ static int binder_proc_transaction(struct binder_transaction *t,
 		if (enqueue_task)
 			binder_enqueue_work_ilocked(&t->work, &proc->todo);
 	} else {
+#ifdef CONFIG_REKERNEL
+		if (frozen_task_group(proc->tsk)) {
+#else
 		if ((t->flags & TF_UPDATE_TXN) && proc->is_frozen) {
+#endif /* CONFIG_REKERNEL */
 			t_outdated = binder_find_outdated_transaction_ilocked(t,
 									      &node->async_todo);
 			if (t_outdated) {
