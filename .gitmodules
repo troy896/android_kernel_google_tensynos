@@ -21,3 +21,7 @@
 	path = Baseband-guard
 	url = https://github.com/vc-teahouse/Baseband-guard
 	branch = main
+[submodule "KernelSU"]
+	path = KernelSU
+	url = https://github.com/ReSukiSU/ReSukiSU
+	branch = main
