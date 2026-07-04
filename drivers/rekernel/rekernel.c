@@ -40,7 +40,13 @@
 
 #include <linux/signal.h>
 #include <uapi/linux/android/binder.h>
+#include <../android/binder_internal.h>
 #include "rekernel.h"
+
+/* Forward declarations for network functions */
+static void net_uid_add(uid_t uid);
+static void net_uid_del(uid_t uid);
+static int rekernel_kill_net_connections(pid_t pid);
 
 /* ---- netlink transport ---- */
 
@@ -133,7 +139,7 @@ static struct netlink_kernel_cfg rekernel_nl_cfg = {
 #ifdef CONFIG_PROC_FS
 static int rekernel_unit_show(struct seq_file *m, void *v)
 {
-	seq_printf(m, "%d\n", netlink_unit);
+	seq_printf(m, "%ld\n", netlink_unit);
 	return 0;
 }
 
@@ -466,7 +472,7 @@ static int start_rekernel(void)
 		return LINE_ERROR;
 	}
 
-	pr_info("Created Re:Kernel server! NETLINK UNIT: %d\n", netlink_unit);
+	pr_info("Created Re:Kernel server! NETLINK UNIT: %ld\n", netlink_unit);
 
 #ifdef CONFIG_PROC_FS
 	rekernel_dir = proc_mkdir("rekernel", NULL);
@@ -475,7 +481,7 @@ static int start_rekernel(void)
 	} else {
 		char buff[32];
 
-		sprintf(buff, "%d", netlink_unit);
+		sprintf(buff, "%ld", netlink_unit);
 		rekernel_unit_entry = proc_create(buff, 0644,
 						  rekernel_dir, &rekernel_unit_fops);
 		if (!rekernel_unit_entry)

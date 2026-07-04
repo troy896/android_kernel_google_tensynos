@@ -8,6 +8,9 @@
 #include <linux/version.h>
 #include <uapi/linux/android/binder.h>
 
+struct binder_transaction;
+struct binder_node;
+
 #define REKERNEL_MAJOR_VERSION		"10.0"
 
 #define CLEAN_UP_ASYNC_BINDER
