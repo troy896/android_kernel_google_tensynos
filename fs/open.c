@@ -455,18 +455,6 @@ static long do_faccessat(int dfd, const char __user *filename, int mode, int fla
 orig_flow:
 #endif
 
-#ifdef CONFIG_KSU_SUSFS
-	if (likely(susfs_is_current_proc_umounted()))
-		goto orig_flow;
-
-	if (static_branch_likely(&ksu_su_compat_enabled)) {
-		if (unlikely(__ksu_is_allow_uid_for_current(current_uid().val)))
-			ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
-	}
-
-orig_flow:
-#endif
-
 	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
 		return -EINVAL;
 
