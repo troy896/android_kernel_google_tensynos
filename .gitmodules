@@ -17,3 +17,7 @@
 	path = v4l2loopback
 	url = https://github.com/v4l2loopback/v4l2loopback.git
 	branch = main
+[submodule "Baseband-guard"]
+	path = Baseband-guard
+	url = https://github.com/vc-teahouse/Baseband-guard
+	branch = main
