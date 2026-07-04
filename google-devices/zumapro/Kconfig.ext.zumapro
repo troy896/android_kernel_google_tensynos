@@ -68,6 +68,8 @@ source "$(KCONFIG_SOC_GS_PREFIX)drivers/video/backlight/Kconfig"
 
 source "$(KCONFIG_SOC_GS_PREFIX)drivers/watchdog/Kconfig"
 
+source "$(KCONFIG_EXT_MODULES_PREFIX)private/google-modules/bms/Kconfig"
+
 source "$(KCONFIG_EXT_MODULES_PREFIX)private/google-modules/bms/misc/Kconfig"
 
 source "$(KCONFIG_EXT_MODULES_PREFIX)private/google-modules/display/common/Kconfig"
