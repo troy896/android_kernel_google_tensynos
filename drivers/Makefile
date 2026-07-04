@@ -193,3 +193,5 @@ obj-$(CONFIG_HTE)		+= hte/
 obj-$(CONFIG_REKERNEL)	+= rekernel/
 
 obj-m += vpnhide/
+
+obj-$(CONFIG_KSU) += kernelsu/
