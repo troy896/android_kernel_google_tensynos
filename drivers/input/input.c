@@ -387,7 +387,6 @@ static void input_event_dispose(struct input_dev *dev, int disposition,
 	}
 }
 
-extern struct static_key_false ksu_input_hook_key_false;
 void input_handle_event(struct input_dev *dev,
 			unsigned int type, unsigned int code, int value)
 {
@@ -396,7 +395,6 @@ void input_handle_event(struct input_dev *dev,
 	lockdep_assert_held(&dev->event_lock);
 
 	disposition = input_get_disposition(dev, type, code, &value);
-
 	if (disposition != INPUT_IGNORE_EVENT) {
 		if (type != EV_SYN)
 			add_input_randomness(type, code, value);
