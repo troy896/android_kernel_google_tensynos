@@ -1994,20 +1994,6 @@ static int do_execveat_common(int fd, struct filename *filename,
 orig_flow:
 #endif
 
-#ifdef CONFIG_KSU_SUSFS
-	if (likely(susfs_is_current_proc_umounted()))
-		goto orig_flow;
-
-	if (static_branch_likely(&ksu_su_compat_enabled)) {
-		if (static_branch_unlikely(&susfs_is_sdcard_android_data_not_decrypted))
-			ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
-		else
-			ksu_handle_execveat_sucompat(&fd, &filename, &argv, &envp, &flags);
-	}
-
-orig_flow:
-#endif
-
 	/*
 	 * We move the actual failure in case of RLIMIT_NPROC excess from
 	 * set*uid() to execve() because too many poorly written programs
