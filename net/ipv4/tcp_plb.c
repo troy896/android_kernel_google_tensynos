@@ -26,15 +26,20 @@ void tcp_plb_update_state(const struct sock *sk, struct tcp_plb_state *plb,
 			  const int cong_ratio)
 {
 	struct net *net = sock_net(sk);
+	struct tcp_plb_net_context *ctx;
 
-	if (!READ_ONCE(net->ipv4.sysctl_tcp_plb_enabled))
+	ctx = tcp_get_plb_ctx(net);
+	if (!ctx)
+		return;
+
+	if (!READ_ONCE(ctx->params.sysctl_tcp_plb_enabled))
 		return;
 
 	if (cong_ratio >= 0) {
-		if (cong_ratio < READ_ONCE(net->ipv4.sysctl_tcp_plb_cong_thresh))
+		if (cong_ratio < READ_ONCE(ctx->params.sysctl_tcp_plb_cong_thresh))
 			plb->consec_cong_rounds = 0;
 		else if (plb->consec_cong_rounds <
-			 READ_ONCE(net->ipv4.sysctl_tcp_plb_rehash_rounds))
+			 READ_ONCE(ctx->params.sysctl_tcp_plb_rehash_rounds))
 			plb->consec_cong_rounds++;
 	}
 }
@@ -46,19 +51,24 @@ EXPORT_SYMBOL_GPL(tcp_plb_update_state);
 void tcp_plb_check_rehash(struct sock *sk, struct tcp_plb_state *plb)
 {
 	struct net *net = sock_net(sk);
+	struct tcp_plb_net_context *ctx;
 	u32 max_suspend;
 	bool forced_rehash = false, idle_rehash = false;
 
-	if (!READ_ONCE(net->ipv4.sysctl_tcp_plb_enabled))
+	ctx = tcp_get_plb_ctx(net);
+	if (!ctx)
+		return;
+
+	if (!READ_ONCE(ctx->params.sysctl_tcp_plb_enabled))
 		return;
 
 	forced_rehash = plb->consec_cong_rounds >=
-			READ_ONCE(net->ipv4.sysctl_tcp_plb_rehash_rounds);
+			READ_ONCE(ctx->params.sysctl_tcp_plb_rehash_rounds);
 	/* If sender goes idle then we check whether to rehash. */
-	idle_rehash = READ_ONCE(net->ipv4.sysctl_tcp_plb_idle_rehash_rounds) &&
+	idle_rehash = READ_ONCE(ctx->params.sysctl_tcp_plb_idle_rehash_rounds) &&
 		      !tcp_sk(sk)->packets_out &&
 		      plb->consec_cong_rounds >=
-		      READ_ONCE(net->ipv4.sysctl_tcp_plb_idle_rehash_rounds);
+		      READ_ONCE(ctx->params.sysctl_tcp_plb_idle_rehash_rounds);
 
 	if (!forced_rehash && !idle_rehash)
 		return;
@@ -68,7 +78,7 @@ void tcp_plb_check_rehash(struct sock *sk, struct tcp_plb_state *plb)
 	 * end. We clear pause_until to 0 to indicate there is no recent
 	 * RTO event that constrains PLB rehashing.
 	 */
-	max_suspend = 2 * READ_ONCE(net->ipv4.sysctl_tcp_plb_suspend_rto_sec) * HZ;
+	max_suspend = 2 * READ_ONCE(ctx->params.sysctl_tcp_plb_suspend_rto_sec) * HZ;
 	if (plb->pause_until &&
 	    (!before(tcp_jiffies32, plb->pause_until) ||
 	     before(tcp_jiffies32 + max_suspend, plb->pause_until)))
@@ -89,12 +99,17 @@ EXPORT_SYMBOL_GPL(tcp_plb_check_rehash);
 void tcp_plb_update_state_upon_rto(struct sock *sk, struct tcp_plb_state *plb)
 {
 	struct net *net = sock_net(sk);
+	struct tcp_plb_net_context *ctx;
 	u32 pause;
 
-	if (!READ_ONCE(net->ipv4.sysctl_tcp_plb_enabled))
+	ctx = tcp_get_plb_ctx(net);
+	if (!ctx)
 		return;
 
-	pause = READ_ONCE(net->ipv4.sysctl_tcp_plb_suspend_rto_sec) * HZ;
+	if (!READ_ONCE(ctx->params.sysctl_tcp_plb_enabled))
+		return;
+
+	pause = READ_ONCE(ctx->params.sysctl_tcp_plb_suspend_rto_sec) * HZ;
 	pause += prandom_u32_max(pause);
 	plb->pause_until = tcp_jiffies32 + pause;
 

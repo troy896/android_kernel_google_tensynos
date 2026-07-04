@@ -326,7 +326,7 @@ static void tcp_ecn_send_syn(struct sock *sk, struct sk_buff *skb)
 	bool use_ecn = READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_ecn) == 1 ||
 		tcp_ca_needs_ecn(sk) || bpf_needs_ecn;
 	const struct dst_entry *dst = __sk_dst_get(sk);
-
+		
 	if (!use_ecn) {
 		if (dst && dst_feature(dst, RTAX_FEATURE_ECN))
 			use_ecn = true;
@@ -339,7 +339,7 @@ static void tcp_ecn_send_syn(struct sock *sk, struct sk_buff *skb)
 		tp->ecn_flags = TCP_ECN_OK;
 		if (tcp_ca_needs_ecn(sk) || bpf_needs_ecn)
 			INET_ECN_xmit(sk);
-
+		
 		if (dst)
 			tcp_set_ecn_low_from_dst(sk, dst);
 	}
@@ -2026,12 +2026,13 @@ static u32 tcp_tso_autosize(const struct sock *sk, unsigned int mss_now,
 static u32 tcp_tso_segs(struct sock *sk, unsigned int mss_now)
 {
 	const struct tcp_congestion_ops *ca_ops = inet_csk(sk)->icsk_ca_ops;
-	u32 tso_segs;
+	u32 min_tso, tso_segs;
 
-	tso_segs = ca_ops->tso_segs ?
-		ca_ops->tso_segs(sk, mss_now) :
-		tcp_tso_autosize(sk, mss_now,
-				 sock_net(sk)->ipv4.sysctl_tcp_min_tso_segs);
+	min_tso = ca_ops->min_tso_segs ?
+			ca_ops->min_tso_segs(sk) :
+			READ_ONCE(sock_net(sk)->ipv4.sysctl_tcp_min_tso_segs);
+
+	tso_segs = tcp_tso_autosize(sk, mss_now, min_tso);
 	return min_t(u32, tso_segs, sk->sk_gso_max_segs);
 }
 
@@ -2688,7 +2689,6 @@ static bool tcp_write_xmit(struct sock *sk, unsigned int mss_now, int nonagle,
 			skb_set_delivery_time(skb, tp->tcp_wstamp_ns, true);
 			list_move_tail(&skb->tcp_tsorted_anchor, &tp->tsorted_sent_queue);
 			tcp_init_tso_segs(skb, mss_now);
-			tcp_set_tx_in_flight(sk, skb);
 			goto repair; /* Skip network transmission */
 		}
 

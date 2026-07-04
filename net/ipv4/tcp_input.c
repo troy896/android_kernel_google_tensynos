@@ -1102,12 +1102,18 @@ static void tcp_verify_retransmit_hint(struct tcp_sock *tp, struct sk_buff *skb)
  */
 static void tcp_notify_skb_loss_event(struct tcp_sock *tp, const struct sk_buff *skb)
 {
+	struct bbr3 *bbr3 = NULL;
 	struct sock *sk = (struct sock *)tp;
 	const struct tcp_congestion_ops *ca_ops = inet_csk(sk)->icsk_ca_ops;
 
 	tp->lost += tcp_skb_pcount(skb);
-	if (ca_ops->skb_marked_lost)
-		ca_ops->skb_marked_lost(sk, skb);
+
+	if(ca_ops && strncmp(ca_ops->name, "bbr3", 4) == 0)
+	{
+		bbr3 = *(struct bbr3 **)inet_csk_ca(sk);
+		if (bbr3 && bbr3->skb_marked_lost)
+			bbr3->skb_marked_lost(sk, skb);
+	}
 }
 
 void tcp_mark_skb_lost(struct sock *sk, struct sk_buff *skb)
@@ -5641,14 +5647,14 @@ static void __tcp_ack_snd_check(struct sock *sk, int ofo_possible)
 
 	    /* More than one full frame received... */
 	if (((tp->rcv_nxt - tp->rcv_wup) > inet_csk(sk)->icsk_ack.rcv_mss &&
-	     (tp->fast_ack_mode == 1 ||
+		(tp->fast_ack_mode == 1 ||
 	     /* ... and right edge of window advances far enough.
 	      * (tcp_recvmsg() will send ACK otherwise).
 	      * If application uses SO_RCVLOWAT, we want send ack now if
 	      * we have not received enough bytes to satisfy the condition.
 	      */
-	      (tp->rcv_nxt - tp->copied_seq < sk->sk_rcvlowat ||
-	       __tcp_select_window(sk) >= tp->rcv_wnd))) ||
+	    (tp->rcv_nxt - tp->copied_seq < sk->sk_rcvlowat ||
+	     __tcp_select_window(sk) >= tp->rcv_wnd))) ||
 	    /* We ACK each frame or... */
 	    tcp_in_quickack_mode(sk) ||
 	    /* Protocol state mandates a one-time immediate ACK */

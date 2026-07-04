@@ -239,8 +239,6 @@ source "drivers/peci/Kconfig"
 
 source "drivers/hte/Kconfig"
 
-source "drivers/rekernel/Kconfig"
-
 source "google-modules/Kconfig"
 
 source "drivers/kernelsu/Kconfig"
