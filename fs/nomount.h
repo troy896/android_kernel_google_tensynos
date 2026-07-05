@@ -82,7 +82,6 @@ struct nomount_child_name {
 struct nm_child_array {
     atomic_t refcnt;
     u32 num_children;
-    u32 num_whiteouts;      /* Tracks the number of whiteouts */
     u32 heap_size;          /* Tracks the total size of the string block */
     struct rcu_head rcu;
     struct nomount_child_name entries[]; /* Flexible array member */
@@ -189,13 +188,12 @@ enum {
     #define NM_ACTOR_CONTINUE 0
 #endif
 
-#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 12, 0) && LINUX_VERSION_CODE >= KERNEL_VERSION(5, 2, 0)
     #define FLAGS_ARG , int flags
     #define FLAGS_VAL , flags
 #else
     #define FLAGS_ARG /* Nothing */
     #define FLAGS_VAL /* Nothing */
 #endif
-
 
 #endif /* _LINUX_NOMOUNT_H */
