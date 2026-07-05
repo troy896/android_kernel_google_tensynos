@@ -1,0 +1,58 @@
+name: Build Kernel zumapro
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev make ccache libelf-dev xz-utils wget
+
+      - name: Download Toolchain
+        run: |
+          wget https://mirrors.edge.kernel.org/pub/tools/crosstool/files/bin/x86_64/14.2.0/x86_64-gcc-14.2.0-nolibc-aarch64-linux.tar.xz
+          tar -xJf x86_64-gcc-14.2.0-nolibc-aarch64-linux.tar.xz
+          rm x86_64-gcc-14.2.0-nolibc-aarch64-linux.tar.xz
+
+      - name: Set up ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ${{ runner.os }}-ccache-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-
+
+      - name: Build Kernel
+        run: |
+          export PATH="/usr/lib/ccache:$PATH"
+          export CCACHE_DIR=$HOME/.ccache
+          ccache -M 5G
+
+          # Create defconfig
+          make O=out ARCH=arm64 CROSS_COMPILE=$GITHUB_WORKSPACE/gcc-14.2.0-nolibc/aarch64-linux/bin/aarch64-linux- CC=$GITHUB_WORKSPACE/gcc-14.2.0-nolibc/aarch64-linux/bin/aarch64-linux-gcc zumapro_defconfig
+
+          # Build kernel
+          make O=out ARCH=arm64 CROSS_COMPILE="ccache $GITHUB_WORKSPACE/gcc-14.2.0-nolibc/aarch64-linux/bin/aarch64-linux-" CC="ccache $GITHUB_WORKSPACE/gcc-14.2.0-nolibc/aarch64-linux/bin/aarch64-linux-gcc" -j$(nproc --all)
+
+      - name: Create DTB
+        run: |
+          cat ./out/google-devices/zumapro/dts/*.dtb > ./out/dtb || echo "DTB creation failed"
+
+      - name: Upload Kernel Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-image
+          path: out/arch/arm64/boot/Image.lz4
+
+      - name: Upload DTB
+        uses: actions/upload-artifact@v4
+        with:
+          name: dtb
+          path: out/dtb
