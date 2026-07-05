@@ -3,7 +3,6 @@
 #include <linux/slab.h>
 #include <linux/cred.h>
 #include <linux/xattr.h>
-#include <linux/version.h>
 #include "nomount.h"
 
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_uid_cachep __read_mostly;
@@ -237,183 +236,36 @@ static inline void nm_sync_inode_times(struct inode *v_inode, struct inode *r_in
 #endif
 }
 
-static int nm_open(struct inode *inode, struct file *file)
+static int nm_file_open(struct inode *inode, struct file *file)
 {
     struct inode *r_inode = inode->i_private;
-    int ret = 0;
+    if (unlikely(!r_inode)) return -ENODEV;
 
-    if (r_inode && r_inode->i_fop && r_inode->i_fop->open) {
-        file->f_inode = r_inode;
-        file->f_mapping = r_inode->i_mapping;
-        ret = r_inode->i_fop->open(r_inode, file);
-        file->f_inode = inode;
-    }
-    return ret;
-}
-
-static int nm_release(struct inode *inode, struct file *file)
-{
-    struct inode *r_inode = inode->i_private;
-    int ret = 0;
-
-    if (r_inode && r_inode->i_fop && r_inode->i_fop->release) {
-        file->f_inode = r_inode;
-        ret = r_inode->i_fop->release(r_inode, file);
-        file->f_inode = inode;
-    }
-    return ret;
-}
-
-static loff_t nm_llseek(struct file *file, loff_t offset, int whence)
-{
-    struct inode *v_inode = file_inode(file);
-    struct inode *r_inode = v_inode->i_private;
-
-    if (likely(r_inode)) {
-        v_inode->i_size = i_size_read(r_inode);
-    }
-    return generic_file_llseek(file, offset, whence);
-}
-
-static ssize_t nm_read_iter(struct kiocb *iocb, struct iov_iter *to)
-{
-    struct file *file = iocb->ki_filp;
-    struct inode *v_inode = file_inode(file);
-    struct inode *r_inode = v_inode->i_private;
-    ssize_t ret;
-
-    if (unlikely(!r_inode || !r_inode->i_fop || !r_inode->i_fop->read_iter))
-        return generic_file_read_iter(iocb, to);
-
-    file->f_mapping = r_inode->i_mapping;
-    file->f_inode = r_inode;
-    ret = r_inode->i_fop->read_iter(iocb, to);
-    file->f_inode = v_inode;
-    
-    return ret;
-}
-
-static ssize_t nm_write_iter(struct kiocb *iocb, struct iov_iter *from)
-{
-    struct file *file = iocb->ki_filp;
-    struct inode *v_inode = file_inode(file);
-    struct inode *r_inode = v_inode->i_private;
-    ssize_t ret;
-
-    if (unlikely(!r_inode || !r_inode->i_fop || !r_inode->i_fop->write_iter))
-        return generic_file_write_iter(iocb, from);
-
-    file->f_mapping = r_inode->i_mapping;
-    file->f_inode = r_inode;
-    ret = r_inode->i_fop->write_iter(iocb, from);
-    file->f_inode = v_inode;
-
-    return ret;
-}
-
-static int nm_mmap(struct file *file, struct vm_area_struct *vma)
-{
-    struct inode *v_inode = file_inode(file);
-    struct inode *r_inode = v_inode->i_private;
-    const struct file_operations *old_fop;
-    int ret;
-
-    if (unlikely(!r_inode))
-        return -ENODEV;
-
-    file->f_mapping = r_inode->i_mapping;
-    file->f_inode = r_inode;
-
-    if (unlikely(!r_inode->i_fop || !r_inode->i_fop->mmap)) {
-        ret = generic_file_mmap(file, vma);
-        file->f_inode = v_inode;
-        return ret;
+    if (file->f_mode & (FMODE_WRITE | FMODE_PWRITE)) {
+        atomic_inc(&r_inode->i_writecount);
+        atomic_dec(&inode->i_writecount);
     }
 
-    old_fop = file->f_op;
-    file->f_op = r_inode->i_fop;
-    
-    ret = r_inode->i_fop->mmap(file, vma);
-    
-    file->f_op = old_fop;
-    file->f_inode = v_inode;
-
-    if (ret == -ENODEV || ret == -ENOEXEC) {
-        file->f_inode = r_inode;
-        ret = generic_file_mmap(file, vma);
-        file->f_inode = v_inode;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+    if (file->f_mode & FMODE_READ) {
+        atomic_inc(&r_inode->i_readcount);
+        atomic_dec(&inode->i_readcount);
     }
-
-    return ret;
-}
-
-static const struct file_operations nm_fops = {
-    .llseek = nm_llseek,
-    .open = nm_open,
-    .release = nm_release,
-    .read_iter = nm_read_iter,
-    .write_iter = nm_write_iter,
-    .mmap = nm_mmap,
-};
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
-static int nm_mmap_prepare(struct vm_area_desc *desc)
-{
-    struct file *file = desc->file;
-    struct inode *v_inode = file_inode(file);
-    struct inode *r_inode = v_inode->i_private;
-    const struct file_operations *old_fop;
-    int ret;
-
-    if (unlikely(!r_inode || !r_inode->i_fop || !r_inode->i_fop->mmap_prepare))
-        return -ENODEV;
-
-    file->f_mapping = r_inode->i_mapping;
-    file->f_inode = r_inode;
-    old_fop = file->f_op;
-    file->f_op = r_inode->i_fop;
-    
-    ret = r_inode->i_fop->mmap_prepare(desc);
-    
-    file->f_op = old_fop;
-    file->f_inode = v_inode;
-    file->f_mapping = v_inode->i_mapping;
-
-    return ret;
-}
-
-static const struct file_operations nm_fops_mmap_prepare = {
-    .llseek = nm_llseek,
-    .open = nm_open,
-    .release = nm_release,
-    .read_iter = nm_read_iter,
-    .write_iter = nm_write_iter,
-    .mmap_prepare = nm_mmap_prepare,
-};
 #endif
 
-static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
-{
-    struct inode *v_inode = d_inode(dentry);
-    struct inode *r_inode = v_inode->i_private;
-    struct dentry *r_dentry;
-    ssize_t ret;
+    if (unlikely(atomic_read(&r_inode->i_writecount) > 0))
+        atomic_set(&r_inode->i_writecount, 0);
 
-    if (unlikely(!r_inode || !r_inode->i_op || !r_inode->i_op->listxattr))
-        return -EOPNOTSUPP;
+    file->f_inode = r_inode;
+    file->f_mapping = r_inode->i_mapping;
+    file->f_op = r_inode->i_fop;
 
-    r_dentry = d_find_alias(r_inode);
-    if (!r_dentry) {
-        struct inode *grabbed = igrab(r_inode);
-        if (!grabbed) return -ENODATA;
-        r_dentry = d_obtain_alias(grabbed);
-        if (IS_ERR(r_dentry)) return PTR_ERR(r_dentry);
-    }
-
-    ret = r_inode->i_op->listxattr(r_dentry, buffer, size);
-    dput(r_dentry);
-    return ret;
+    return 0; 
 }
+
+static const struct file_operations nm_file_fops = {
+    .open = nm_file_open,
+};
 
 static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat, u32 request_mask, unsigned int query_flags)
 {
@@ -435,7 +287,7 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
     return 0;
 }
 
-static int nm_setattr(IDMAP_ARG struct dentry *dentry, struct iattr *attr)
+static int nm_file_setattr(IDMAP_ARG struct dentry *dentry, struct iattr *attr)
 {
     struct inode *v_inode = d_inode(dentry);
     struct inode *r_inode = v_inode->i_private;
@@ -471,31 +323,58 @@ static int nm_setattr(IDMAP_ARG struct dentry *dentry, struct iattr *attr)
     return err;
 }
 
-static const char *nm_get_link(struct dentry *dentry, struct inode *inode, struct delayed_call *done)
+static ssize_t nm_file_listxattr(struct dentry *dentry, char *buffer, size_t size)
 {
-    struct inode *real_inode = inode->i_private;
+    struct inode *v_inode = d_inode(dentry);
+    struct inode *r_inode = v_inode->i_private;
+    struct dentry *r_dentry;
+    ssize_t ret;
 
-    if (!dentry)
-        return ERR_PTR(-ECHILD);
+    if (unlikely(!r_inode || !r_inode->i_op || !r_inode->i_op->listxattr))
+        return -EOPNOTSUPP;
 
-    if (real_inode && real_inode->i_op && real_inode->i_op->get_link)
-        return real_inode->i_op->get_link(dentry, real_inode, done);
+    r_dentry = d_find_alias(r_inode);
+    if (!r_dentry) {
+        struct inode *grabbed = igrab(r_inode);
+        if (!grabbed) return -ENODATA;
+        r_dentry = d_obtain_alias(grabbed);
+        if (IS_ERR(r_dentry)) return PTR_ERR(r_dentry);
+    }
 
-    return ERR_PTR(-EINVAL);
+    ret = r_inode->i_op->listxattr(r_dentry, buffer, size);
+    dput(r_dentry);
+    return ret;
 }
 
 static const struct inode_operations nm_file_iops = {
     .getattr = nm_file_getattr,
-    .setattr = nm_setattr,
-    .listxattr = nm_listxattr,
+    .setattr = nm_file_setattr,
+    .listxattr = nm_file_listxattr,
 };
 
-static const struct inode_operations nm_symlink_iops = {
-    .getattr = simple_getattr,
-    .setattr = nm_setattr,
-    .get_link = nm_get_link,
-    .listxattr = nm_listxattr,
-};
+static int nm_dir_open(struct inode *inode, struct file *file)
+{
+    struct inode *r_inode = inode->i_private;
+    int ret = 0;
+    if (r_inode && r_inode->i_fop && r_inode->i_fop->open) {
+        file->f_inode = r_inode;
+        ret = r_inode->i_fop->open(r_inode, file);
+        file->f_inode = inode;
+    }
+    return ret;
+}
+
+static int nm_dir_release(struct inode *inode, struct file *file)
+{
+    struct inode *r_inode = inode->i_private;
+    int ret = 0;
+    if (r_inode && r_inode->i_fop && r_inode->i_fop->release) {
+        file->f_inode = r_inode;
+        ret = r_inode->i_fop->release(r_inode, file);
+        file->f_inode = inode;
+    }
+    return ret;
+}
 
 static int nm_dir_iterate_shared(struct file *file, struct dir_context *ctx)
 {
@@ -527,6 +406,17 @@ static int nm_dir_iterate(struct file *file, struct dir_context *ctx)
 }
 #endif
 
+static const struct file_operations nm_dir_fops = {
+    .open = nm_dir_open,
+    .release = nm_dir_release,
+    .llseek = generic_file_llseek,
+    .read = generic_read_dir,
+    .iterate_shared = nm_dir_iterate_shared,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
+    .iterate = nm_dir_iterate,
+#endif
+};
+
 static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 {
     struct inode *r_dir = dir->i_private;
@@ -536,22 +426,11 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
     return ERR_PTR(-EOPNOTSUPP);
 }
 
-static const struct file_operations nm_dir_fops = {
-    .open = nm_open,
-    .release = nm_release,
-    .llseek = nm_llseek,
-    .read = generic_read_dir,
-    .iterate_shared = nm_dir_iterate_shared,
-#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 6, 0)
-    .iterate = nm_dir_iterate,
-#endif
-};
-
 static const struct inode_operations nm_dir_iops = {
     .lookup = nm_dir_lookup,
     .getattr = nm_file_getattr,
-    .setattr = nm_setattr,
-    .listxattr = nm_listxattr,
+    .setattr = nm_file_setattr,
+    .listxattr = nm_file_listxattr,
 };
 
 struct nm_xattr_proxy {
@@ -562,8 +441,7 @@ struct nm_xattr_proxy {
 static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dentry, struct inode *inode, const char *name, void *buffer, size_t size FLAGS_ARG)
 {
     struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
-    
-    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_symlink_iops || inode->i_op == &nm_dir_iops) {
+    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         struct inode *r_inode = inode->i_private;
         if (!r_inode) return -ENODATA;
         if (r_inode->i_sb != inode->i_sb) return -ENODATA;
@@ -575,8 +453,7 @@ static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dent
 static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct dentry *dentry, struct inode *inode, const char *name, const void *buffer, size_t size, int flags)
 {
     struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
-    
-    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_symlink_iops || inode->i_op == &nm_dir_iops) {
+    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         struct inode *r_inode = inode->i_private;
         if (!r_inode) return -ENODATA;
         if (r_inode->i_sb != inode->i_sb) return -EOPNOTSUPP;
@@ -592,7 +469,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb,
     struct inode *inode = new_inode(virtual_sb);
     if (unlikely(!inode)) return NULL;
 
-    inode->i_ino = rule->v_ino;
+    inode->i_ino = (unsigned long)rule->v_hash;
     inode->i_mode = real_inode->i_mode;
     inode->i_size = i_size_read(real_inode);
     inode->i_blocks = real_inode->i_blocks;
@@ -603,18 +480,11 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb,
     if (S_ISDIR(real_inode->i_mode)) {
         inode->i_op = &nm_dir_iops;
         inode->i_fop = &nm_dir_fops;
-    } else if (S_ISLNK(real_inode->i_mode) || (real_inode->i_op && real_inode->i_op->get_link)) {
-        inode->i_op = &nm_symlink_iops;
-        inode->i_fop = &nm_fops;
     } else { 
         inode->i_op = &nm_file_iops;
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
-        if (real_inode->i_fop && real_inode->i_fop->mmap_prepare)
-            inode->i_fop = &nm_fops_mmap_prepare;
-        else
-#endif
-            inode->i_fop = &nm_fops;
+        inode->i_fop = &nm_file_fops;
     }
+    
     inode->i_mapping = real_inode->i_mapping;
     inode->i_private = igrab(real_inode);
     inode->i_flags |= S_PRIVATE | S_NOATIME | S_NOCMTIME | S_NOSEC;
@@ -666,15 +536,59 @@ fallback:
 static void nomount_hijacked_destroy_inode(struct inode *inode)
 {
     struct nm_sop *nm_sop;
+    struct nm_iop *nm_iop;
+    struct nm_fop *nm_fop;
 
-    if (inode->i_private) {
-        iput((struct inode *)inode->i_private);
-        inode->i_private = NULL;
+    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
+        if (inode->i_private) {
+            iput((struct inode *)inode->i_private);
+            inode->i_private = NULL;
+        }
+    }
+
+    nm_iop = __get_nm(smp_load_acquire(&inode->i_op), struct nm_iop, fake_iop);
+    if (nm_iop) {
+        if (nm_iop->dir_node) nm_iop->dir_node->dir_inode = NULL;
+        inode->i_op = nm_iop->orig_iop;
+        kfree_rcu(nm_iop, rcu);
+    }
+
+    nm_fop = __get_nm(smp_load_acquire(&inode->i_fop), struct nm_fop, fake_fop);
+    if (nm_fop) {
+        if (nm_fop->dir_node) nm_fop->dir_node->dir_inode = NULL;
+        inode->i_fop = nm_fop->orig_fop;
+        kfree_rcu(nm_fop, rcu);
     }
 
     nm_sop = __get_nm(smp_load_acquire(&inode->i_sb->s_op), struct nm_sop, fake_sop);
     if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->destroy_inode) {
         nm_sop->orig_sop->destroy_inode(inode);
+    }
+}
+
+static void nomount_hijacked_put_super(struct super_block *sb)
+{
+    struct nm_sop *nm_sop = __get_nm(smp_load_acquire(&sb->s_op), struct nm_sop, fake_sop);
+    void (*orig_put_super)(struct super_block *);
+    
+    if (nm_sop) {
+        orig_put_super = nm_sop->orig_sop->put_super;
+        hash_del_rcu(&nm_sop->node);
+        smp_store_release(&sb->s_op, nm_sop->orig_sop);
+
+        if (nm_sop->fake_xattr) {
+            int i = 0;
+            smp_store_release((const struct xattr_handler ***)&sb->s_xattr, nm_sop->orig_xattr);
+            while (nm_sop->fake_xattr[i]) {
+                kfree(container_of(nm_sop->fake_xattr[i], struct nm_xattr_proxy, fake));
+                i++;
+            }
+            kfree(nm_sop->fake_xattr);
+        }
+        kfree_rcu(nm_sop, rcu);
+
+        if (orig_put_super)
+            orig_put_super(sb);
     }
 }
 
@@ -694,6 +608,7 @@ static inline void nomount_hijack_superblock(struct super_block *sb)
     nm_sop->signature = NOMOUNT_MAGIC_SIG;
     nm_sop->sb = sb;
     nm_sop->fake_sop.destroy_inode = nomount_hijacked_destroy_inode;
+    nm_sop->fake_sop.put_super = nomount_hijacked_put_super;
 
     if (sb->s_xattr && !nm_sop->orig_xattr) {
         const struct xattr_handler **new_array;
@@ -784,22 +699,20 @@ static void nomount_restore_dir_node(struct nomount_dir_node *dir_node)
     struct nm_iop *nm_iop;
     struct nm_fop *nm_fop;
     struct dentry *d;
- 
-    if (unlikely(!t_inode)) return;
+
+    if (!t_inode || !igrab(t_inode)) return;
 
     spin_lock(&t_inode->i_lock);
     nm_iop = __get_nm(smp_load_acquire(&t_inode->i_op), struct nm_iop, fake_iop);
     if (nm_iop && nm_iop->dir_node == dir_node) {
         smp_store_release(&t_inode->i_op, nm_iop->orig_iop);
         if (!nm_iop->had_private_flag) t_inode->i_flags &= ~S_PRIVATE;
-        nm_debug("Successfully cured i_op for dir %lu\n", t_inode->i_ino);
         kfree_rcu(nm_iop, rcu);
     }
 
     nm_fop = __get_nm(smp_load_acquire(&t_inode->i_fop), struct nm_fop, fake_fop);
     if (nm_fop && nm_fop->dir_node == dir_node) {
         smp_store_release(&t_inode->i_fop, nm_fop->orig_fop);
-        nm_debug("Successfully cured i_fop for dir %lu\n", t_inode->i_ino);
         kfree_rcu(nm_fop, rcu);
     }
     spin_unlock(&t_inode->i_lock);
@@ -811,7 +724,7 @@ static void nomount_restore_dir_node(struct nomount_dir_node *dir_node)
         dput(d);
     }
 
-    iput(t_inode);
+    iput(t_inode); 
     dir_node->dir_inode = NULL;
 }
 
@@ -847,7 +760,7 @@ static struct nomount_dir_node *__nomount_alloc_dir_node(struct inode *inode)
     struct nomount_dir_node *dir_node = kmem_cache_alloc(nm_dir_cachep, GFP_KERNEL);
     if (unlikely(!dir_node)) return NULL;
 
-    dir_node->dir_inode = inode ? igrab(inode) : NULL;
+    dir_node->dir_inode = inode;
     RCU_INIT_POINTER(dir_node->child_array, NULL);
     list_add_tail(&dir_node->list, &nomount_all_dirs_list);
 
@@ -1090,7 +1003,6 @@ static int nomount_generate_virtual_topology(struct nomount_rule *rule)
             irule->v_len = (u16)cur_v_len;
             irule->v_hash = h_inter;
             irule->flags = NM_FLAG_IS_DIR;
-            irule->v_ino = (unsigned long)h_inter;
 
             memcpy(nm_get_vpath(irule), v_tmp, cur_v_len);
             nm_get_vpath(irule)[cur_v_len] = '\0';
@@ -1170,7 +1082,6 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
 
     INIT_HLIST_NODE(&rule->vpath_node);
     rule->v_hash = hash;
-    rule->v_ino = (unsigned long)hash;
     rule->flags = flags;
 
     if (!is_whiteout && kern_path(nm_get_rpath(rule), LOOKUP_FOLLOW, &r_path_struct_main) == 0) {
@@ -1586,3 +1497,4 @@ MODULE_DESCRIPTION("NoMount Path Redirection VFS Subsystem");
 
 fs_initcall(nomount_init);
 module_exit(nomount_exit);
+

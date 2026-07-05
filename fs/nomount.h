@@ -15,7 +15,7 @@
 #endif
 #include <linux/jump_label.h>
 
-#define NOMOUNT_VERSION    "12"
+#define NOMOUNT_VERSION   "12"
 #define NOMOUNT_HASH_BITS  12
 #define NOMOUNT_SMALL_HASH_BITS 4
 #define NM_FLAG_IS_DIR      (1 << 1)
@@ -47,7 +47,6 @@ struct nm_iop {
     u64 signature;
     struct nomount_rule *rule; 
     struct nomount_dir_node *dir_node;
-    bool is_whiteout;
     bool had_private_flag;
     struct rcu_head rcu;
 };
@@ -107,7 +106,6 @@ struct nomount_rule {
     struct nomount_dir_node *parent_dir;
     struct nomount_dir_node *this_dir;
     struct inode *cached_r_inode;
-    unsigned long v_ino;
     u32 v_hash;
     u16 v_len;
     u8  flags;
@@ -142,7 +140,6 @@ enum {
     NM_CMD_GET_LIST,
     __NM_CMD_MAX,
 };
-#define NOMOUNT_CMD_MAX (__NM_CMD_MAX - 1)
 
 /* Attributes */
 enum {
@@ -197,3 +194,4 @@ enum {
 #endif
 
 #endif /* _LINUX_NOMOUNT_H */
+
