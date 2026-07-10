@@ -56,6 +56,12 @@
 
 #include "dev.h"
 
+#ifdef CONFIG_VPNHIDE
+extern bool vpnhide_is_target_uid(void);
+extern bool vpnhide_is_vpn_ifname(const char *name);
+extern bool vpnhide_debug_enabled;
+#endif
+
 #define RTNL_MAX_TYPE		50
 #define RTNL_SLAVE_MAX_TYPE	40
 
@@ -1777,6 +1783,13 @@ static int rtnl_fill_ifinfo(struct sk_buff *skb,
 			    u32 event, int *new_nsid, int new_ifindex,
 			    int tgt_netnsid, gfp_t gfp)
 {
+#ifdef CONFIG_VPNHIDE
+	if (vpnhide_is_target_uid() && vpnhide_is_vpn_ifname(dev->name)) {
+		if(vpnhide_debug_enabled)
+			pr_info("vpnhide: rtnl_fill_ifinfo: hiding iface=%s\n", dev->name);
+		return -EMSGSIZE;
+	}
+#endif	
 	struct ifinfomsg *ifm;
 	struct nlmsghdr *nlh;
 	struct Qdisc *qdisc;

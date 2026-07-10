@@ -12,6 +12,11 @@
 
 #include "dev.h"
 
+#ifdef CONFIG_VPNHIDE
+extern bool vpnhide_is_target_uid(void);
+extern bool vpnhide_is_vpn_ifname(const char *name);
+extern bool vpnhide_debug_enabled;
+#endif
 /*
  *	Map an interface index to its name (SIOCGIFNAME)
  */
@@ -65,6 +70,10 @@ int dev_ifconf(struct net *net, struct ifconf __user *uifc)
 	/* Loop over the interfaces, and write an info block for each. */
 	rtnl_lock();
 	for_each_netdev(net, dev) {
+#ifdef CONFIG_VPNHIDE
+		if (vpnhide_is_target_uid() && vpnhide_is_vpn_ifname(dev->name))
+			continue;
+#endif		
 		if (!pos)
 			done = inet_gifconf(dev, NULL, 0, size);
 		else
@@ -464,8 +473,22 @@ int dev_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr,
 
 	if (need_copyout)
 		*need_copyout = true;
+#ifdef CONFIG_VPNHIDE
+	if (cmd == SIOCGIFNAME) {
+		int __r = dev_ifname(net, ifr);
+		if (!__r && vpnhide_is_target_uid() &&
+		    vpnhide_is_vpn_ifname(ifr->ifr_name)) {
+			if(vpnhide_debug_enabled)
+				pr_info("vpnhide: dev_ioctl: hiding SIOCGIFNAME iface=%s\n",
+				    ifr->ifr_name);
+			return -ENODEV;
+		}
+		return __r;
+	}
+#else
 	if (cmd == SIOCGIFNAME)
 		return dev_ifname(net, ifr);
+#endif
 
 	ifr->ifr_name[IFNAMSIZ-1] = 0;
 
@@ -501,6 +524,15 @@ int dev_ioctl(struct net *net, unsigned int cmd, struct ifreq *ifr,
 		rcu_read_lock();
 		ret = dev_ifsioc_locked(net, ifr, cmd);
 		rcu_read_unlock();
+#ifdef CONFIG_VPNHIDE
+		if (!ret && vpnhide_is_target_uid() &&
+		    vpnhide_is_vpn_ifname(ifr->ifr_name)) {
+			if(vpnhide_debug_enabled)
+				pr_info("vpnhide: dev_ioctl: hiding iface=%s cmd=0x%x\n",
+				    ifr->ifr_name, cmd);
+			ret = -ENODEV;
+		}
+#endif
 		if (colon)
 			*colon = ':';
 		return ret;
