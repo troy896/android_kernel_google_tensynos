@@ -1307,14 +1307,12 @@ static int override_release(char __user *release, size_t len)
 
 #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
 extern struct static_key_false susfs_is_uname_spoof_buffer_set;
-extern void susfs_spoof_uname(struct new_utsname *tmp);
+extern void susfs_spoof_uname(struct new_utsname* tmp);
 #endif
 
 SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 {
 	struct new_utsname tmp;
-	struct task_struct *t;
-	bool is_gms = false;
 
 	down_read(&uts_sem);
 	memcpy(&tmp, utsname(), sizeof(tmp));
@@ -1322,21 +1320,9 @@ SYSCALL_DEFINE1(newuname, struct new_utsname __user *, name)
 	if (static_branch_likely(&susfs_is_uname_spoof_buffer_set))
 		susfs_spoof_uname(&tmp);
 #endif
+
+
 	up_read(&uts_sem);
-
-	rcu_read_lock();
-	for_each_thread(current, t) {
-		if (thread_group_leader(t)) {
-			is_gms = !strcmp(t->comm, "id.gms.unstable");
-			break;
-		}
-	}
-	rcu_read_unlock();
-
-	if (is_gms)
-		snprintf(tmp.release, sizeof(tmp.release), "%u.%u.%u",
-			 LINUX_VERSION_MAJOR, LINUX_VERSION_PATCHLEVEL,
-			 LINUX_VERSION_SUBLEVEL);
 
 	if (copy_to_user(name, &tmp, sizeof(tmp)))
 		return -EFAULT;

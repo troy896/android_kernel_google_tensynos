@@ -428,12 +428,6 @@ extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int
 			int *flags);
 #endif
 
-#ifdef CONFIG_KSU_SUSFS
-extern struct static_key_true ksu_su_compat_enabled;
-extern bool __ksu_is_allow_uid_for_current(uid_t uid);
-extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,
-			int *flags);
-#endif
 
 static long do_faccessat(int dfd, const char __user *filename, int mode, int flags)
 {
@@ -1432,10 +1426,9 @@ static long do_sys_openat2(int dfd, const char __user *filename,
 	fd = get_unused_fd_flags(how->flags);
 #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 retry:
-#endif
+#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 	if (fd >= 0) {
 		struct file *f = do_filp_open(dfd, tmp, &op);
-
 #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 		if (!is_inode_open_redirect && f && !IS_ERR(f)) {
 			struct inode *inode = file_inode(f);
@@ -1450,7 +1443,7 @@ retry:
 				}
 			}
 		}
-#endif
+#endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 
 		if (IS_ERR(f) && !libperfmgr_redirect(&f, dfd, tmp, &op, how)) {
 			put_unused_fd(fd);

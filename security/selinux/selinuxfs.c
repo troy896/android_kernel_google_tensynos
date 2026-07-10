@@ -54,6 +54,15 @@ extern bool ksu_selinux_hide_enabled __read_mostly;
 extern void initialize_fake_status(void);
 #endif // #ifdef CONFIG_KSU_SUSFS
 
+#ifdef CONFIG_KSU_SUSFS
+extern struct selinux_state fake_state;
+extern struct page *fake_status;
+extern struct static_key_false fake_status_initialize_key;
+extern bool ksu_selinux_hide_running __read_mostly;
+extern bool ksu_selinux_hide_enabled __read_mostly;
+extern void initialize_fake_status(void);
+#endif // #ifdef CONFIG_KSU_SUSFS
+
 enum sel_inos {
 	SEL_ROOT_INO = 2,
 	SEL_LOAD,	/* load policy */

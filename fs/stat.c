@@ -244,16 +244,6 @@ extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *fla
 #endif
 #endif
 
-#ifdef CONFIG_KSU_SUSFS
-extern struct static_key_true ksu_su_compat_enabled;
-extern bool __ksu_is_allow_uid_for_current(uid_t uid);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
-extern int ksu_handle_stat(int *dfd, struct filename **filename, int *flags);
-#else
-extern int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags);
-#endif
-#endif
-
 /**
  * vfs_statx - Get basic and extra attributes by filename
  * @dfd: A file descriptor representing the base dir for a relative filename

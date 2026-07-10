@@ -48,9 +48,9 @@
 #include <trace/hooks/avc.h>
 
 #ifdef CONFIG_KSU_SUSFS
+extern struct static_key_false susfs_is_avc_log_spoofing_enabled;
 extern u32 susfs_ksu_sid;
 extern u32 susfs_priv_app_sid;
-extern struct static_key_false susfs_is_avc_log_spoofing_enabled;
 #endif
 
 struct avc_entry {
