@@ -5,10 +5,6 @@
 [submodule "drivers/net/can/usb-can-2-module"]
 	path = drivers/net/can/usb-can-2-module
 	url = https://github.com/V0lk3n/usb-can-2-module
-[submodule "vpnhide"]
-	path = vpnhide
-	url = https://github.com/okhsunrog/vpnhide.git
-	branch = main
 [submodule "fs/ntfs"]
 	path = fs/ntfs
 	url = https://github.com/namjaejeon/linux-ntfs.git
