@@ -2884,8 +2884,7 @@ static int load_integrated_module(const char *modname, const char __user *uargs)
 	init_done = (void *)kallsyms_lookup_name(kmod);
 	if (!init_done) {
 		pr_info("%s: module '%s' not found\n", __func__, modname);
-		/* Don't return an error even if the module wasn't found */
-		return 0;
+		return -ENOENT;
 	}
 
 	args = strndup_user(uargs, ~0UL >> 1);
@@ -2980,7 +2979,14 @@ static int load_module(struct load_info *info, const char __user *uargs,
 	if (IS_ENABLED(CONFIG_INTEGRATE_MODULES)) {
 		/* Load the built-in version of this module */
 		err = load_integrated_module(info->name, uargs);
-		goto free_copy;
+		if (err == -ENOENT && IS_ENABLED(CONFIG_MODULES)) {
+			/* Fall through to load as real external module */
+		} else {
+			/* If CONFIG_MODULES is disabled, map -ENOENT back to 0 to preserve legacy behavior */
+			if (err == -ENOENT)
+				err = 0;
+			goto free_copy;
+		}
 	}
 
 	/*

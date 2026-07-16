@@ -24,7 +24,6 @@ config INTEGRATE_MODULES
 
 menuconfig MODULES
 	bool "Enable loadable module support"
-	depends on !INTEGRATE_MODULES
 	help
 	  Kernel modules are small pieces of compiled code which can
 	  be inserted in the running kernel, rather than being

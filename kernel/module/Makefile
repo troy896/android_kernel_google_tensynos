@@ -4,7 +4,9 @@
 #
 
 ifeq ($(CONFIG_INTEGRATE_MODULES),y)
+ifneq ($(CONFIG_MODULES),y)
 ccflags-y += -DCONFIG_MODULES=1
+endif
 endif
 
 # These are called from save_stack_trace() on slub debug path,
