@@ -1108,11 +1108,13 @@ static void tcp_notify_skb_loss_event(struct tcp_sock *tp, const struct sk_buff 
 
 	tp->lost += tcp_skb_pcount(skb);
 
-	if(ca_ops && strncmp(ca_ops->name, "bbr3", 4) == 0)
-	{
+	if (ca_ops && (ca_ops->flags & TCP_CONG_HAS_LOSS_HOOK)) {
+		void (*hook)(struct sock *, const struct sk_buff *);
+
 		bbr3 = *(struct bbr3 **)inet_csk_ca(sk);
-		if (bbr3 && bbr3->skb_marked_lost)
-			bbr3->skb_marked_lost(sk, skb);
+		hook = bbr3 ? READ_ONCE(bbr3->skb_marked_lost) : NULL;
+		if (hook)
+			hook(sk, skb);
 	}
 }
 

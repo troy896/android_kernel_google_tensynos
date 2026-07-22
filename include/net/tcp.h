@@ -1111,6 +1111,8 @@ enum tcp_ca_ack_event_flags {
 #define TCP_CONG_NEEDS_ECN	0x2
 /* Wants notification of CE events (CA_EVENT_ECN_IS_CE, CA_EVENT_ECN_NO_CE). */
 #define TCP_CONG_WANTS_CE_EVENTS	0x4
+/* CC provides a per-skb loss hook (BBRv3-private; see tcp_notify_skb_loss_event). */
+#define TCP_CONG_HAS_LOSS_HOOK	0x8
 #define TCP_CONG_MASK	(TCP_CONG_NON_RESTRICTED | \
 			 TCP_CONG_NEEDS_ECN | \
 			 TCP_CONG_WANTS_CE_EVENTS)
@@ -1246,8 +1248,9 @@ static inline bool tcp_ca_wants_ce_events(const struct sock *sk)
 {
 	const struct inet_connection_sock *icsk = inet_csk(sk);
 
-	return icsk->icsk_ca_ops->flags & (TCP_CONG_NEEDS_ECN |
-					   TCP_CONG_WANTS_CE_EVENTS);
+	return icsk->icsk_ca_ops &&
+	       (icsk->icsk_ca_ops->flags & (TCP_CONG_NEEDS_ECN |
+					    TCP_CONG_WANTS_CE_EVENTS));
 }
 
 static inline bool tcp_ca_needs_ecn(const struct sock *sk)
