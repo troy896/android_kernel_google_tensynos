@@ -6,21 +6,23 @@
 #include <linux/list.h>
 #include <linux/hashtable.h>
 #include <linux/atomic.h>
-#include <linux/ioctl.h>
+#include <net/sock.h>
+#include <net/genetlink.h>
 #include <linux/version.h>
-#include <linux/module.h>
-#include <linux/compat.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
+#include <linux/unaligned.h>
+#else
+#include <asm/unaligned.h>
+#endif
 #include <linux/jump_label.h>
 
 #define NM_MODULE_VERSION "12"
 #define NOMOUNT_VERSION    12
 #define NOMOUNT_HASH_BITS  12
-#define NM_FLAG_INTERNAL_API (1 << 0)
-#define NM_FLAG_INTERNAL_DIR (1 << 1)
-#define NM_FLAG_IS_DIR       (1 << 2)
-#define NM_FLAG_WHITEOUT     (1 << 3)
-#define NM_FLAG_HIDDEN       (1 << 4)
-#define NM_FLAG_HAS_STAT     (1 << 5)
+#define NM_FLAG_INTERNAL_DIR (1 << 0)
+#define NM_FLAG_IS_DIR       (1 << 1)
+#define NM_FLAG_WHITEOUT     (1 << 2)
+#define NM_FLAG_HAS_STAT     (1 << 3)
 
 /* logs */
 #define nm_debug(fmt, ...) printk(KERN_DEBUG "NoMount: [DEBUG] " fmt, ##__VA_ARGS__)
@@ -31,7 +33,6 @@
 static DEFINE_HASHTABLE(nomount_rules_ht, NOMOUNT_HASH_BITS);
 static LIST_HEAD(nomount_sb_list);
 static DEFINE_IDR(nomount_uid_idr);
-static LIST_HEAD(nomount_all_dirs_list);
 static DEFINE_MUTEX(nomount_write_mutex);
 
 /* * Helpers to dynamically calculate the memory address of the strings */
@@ -83,7 +84,6 @@ struct nm_inode_info {
         d_backing_inode(((struct nm_inode_info *)(v_inode)->i_private)->r_path.dentry) : NULL)
 
 struct nomount_child_node {
-    struct list_head list_node;
     struct rcu_head rcu;
     u32 name_hash;
     u32 fake_ino;
@@ -100,10 +100,13 @@ struct nomount_child_node {
 };
 
 struct nomount_dir_node {
-    struct list_head list;
     struct idr children_idr;
     u64 bloom_mask;
-    struct inode *dir_inode;
+    union {
+        struct inode *dir_inode;
+        struct nomount_rule *owner_rule;
+        unsigned long _tag_ptr;
+    };
 };
 
 struct nomount_rule {
@@ -152,31 +155,48 @@ static inline int nm_unpack_pos(loff_t pos) {
     return (int)(pos & 0xFFFFFFFF);
 }
 
-/* ======================== */
-/* IOCTL API DEFINITIONS    */
-/* ======================== */
+/* ========================================================================= */
+/* NETLINK GENERIC PROTOCOL DEFINITIONS */
+/* ========================================================================= */
 
-#define NOMOUNT_IOCTL_MAGIC 'N'
+#define NOMOUNT_GENL_NAME "nomount"
+#define NOMOUNT_GENL_VERSION 1
 
-struct nm_api_payload {
-    u64 magic_sig;
-    u32 flags;
-    u32 uid;
-    u32 version;
-    u16 v_len;
-    u16 r_len;
-    char paths[PATH_MAX * 2]; 
+/* Commands */
+enum {
+    NM_CMD_UNSPEC = 0,
+    NM_CMD_GET_VERSION,
+    NM_CMD_ADD_RULE,
+    NM_CMD_DEL_RULE,
+    NM_CMD_CLEAR_ALL,
+    NM_CMD_ADD_UID,
+    NM_CMD_DEL_UID,
+    NM_CMD_GET_LIST,
+    __NM_CMD_MAX,
 };
 
-#define NM_IOC_ADD_RULE   _IOW(NOMOUNT_IOCTL_MAGIC, 1, struct nm_api_payload)
-#define NM_IOC_DEL_RULE   _IOW(NOMOUNT_IOCTL_MAGIC, 2, struct nm_api_payload)
-#define NM_IOC_CLEAR_ALL  _IO( NOMOUNT_IOCTL_MAGIC, 3)
-#define NM_IOC_ADD_UID    _IOW(NOMOUNT_IOCTL_MAGIC, 4, struct nm_api_payload)
-#define NM_IOC_DEL_UID    _IOW(NOMOUNT_IOCTL_MAGIC, 5, struct nm_api_payload)
-#define NM_IOC_GET_VER    _IOR(NOMOUNT_IOCTL_MAGIC, 6, struct nm_api_payload)
-#define NM_IOC_GET_RULE   _IOW(NOMOUNT_IOCTL_MAGIC, 7, struct nm_api_payload)
+/* Attributes */
+enum {
+    NOMOUNT_ATTR_UNSPEC = 0,
+    NOMOUNT_ATTR_VIRTUAL_PATH,  /* String (NLA_NUL_STRING) */
+    NOMOUNT_ATTR_REAL_PATH,     /* String (NLA_NUL_STRING) */
+    NOMOUNT_ATTR_FLAGS,         /* u32 (NLA_U32) */
+    NOMOUNT_ATTR_UID,           /* u32 (NLA_U32) */
+    NOMOUNT_ATTR_VERSION,       /* u32 (NLA_U32) */
+    NOMOUNT_ATTR_PAYLOAD,       /* Binary payload for GET_LIST (NLA_BINARY) */
+    __NOMOUNT_ATTR_MAX,
+};
+
+#define NOMOUNT_ATTR_MAX (__NOMOUNT_ATTR_MAX - 1)
 
 /* * Compat macros * */
+#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 2, 0)
+    #define NM_OPS_POLICY(p)    .policy = (p),
+    #define NM_FAMILY_POLICY(p)
+#else
+    #define NM_OPS_POLICY(p)
+    #define NM_FAMILY_POLICY(p) .policy = (p),
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
     #define IDMAP_PATH(path) mnt_idmap((path).mnt),

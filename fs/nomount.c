@@ -1,11 +1,10 @@
 #include <linux/init.h>
-#include <linux/fs.h>
-#include <linux/file.h>
 #include <linux/namei.h>
 #include <linux/slab.h>
 #include <linux/cred.h>
 #include <linux/xattr.h>
-#include <linux/uaccess.h>
+#include <linux/version.h>
+#include <linux/module.h>
 #include "nomount.h"
 
 static struct kmem_cache *nm_dir_cachep __read_mostly, *nm_inode_cachep __read_mostly;
@@ -65,6 +64,7 @@ struct nomount_proxy_ctx {
     struct dir_context ctx;
     struct dir_context *orig_ctx;
     struct nomount_dir_node *dir_node;
+    int emitted;
 };
 
 static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *name, int namelen,
@@ -76,7 +76,8 @@ static NM_ACTOR_RET nomount_actor_proxy(struct dir_context *ctx, const char *nam
     u32 hash;
     int id;
 
-    if (!proxy->dir_node) return NM_ACTOR_CONTINUE;
+    proxy->emitted++;
+    if (!proxy->dir_node) goto do_real_actor;
     hash = full_name_hash(NULL, name, namelen);
     if (!(proxy->dir_node->bloom_mask & (1ULL << (hash & 63))))
         goto do_real_actor;
@@ -111,7 +112,7 @@ static inline void nomount_emit_virtual_children(struct dir_context *ctx, struct
     rcu_read_lock();
     idr_for_each_entry_continue(&dir_node->children_idr, child, id) {
         ctx->pos = nm_pack_pos(id);
-        if (!(child->flags & NM_FLAG_WHITEOUT) && !(child->flags & NM_FLAG_HIDDEN)) {
+        if (!(child->flags & NM_FLAG_WHITEOUT)) {
             if (!dir_emit(ctx, child->name, child->name_len, child->fake_ino, child->d_type))
                 break;
         }
@@ -129,7 +130,7 @@ static int nm_open(struct inode *inode, struct file *file)
     const struct cred *old_cred;
 
     if (unlikely(!info)) return -ENODEV;
-    if (info->flags & (NM_FLAG_INTERNAL_DIR | NM_FLAG_INTERNAL_API)) {
+    if (unlikely(info->flags & NM_FLAG_INTERNAL_DIR)) {
         file->private_data = NULL;
         return 0;
     }
@@ -300,8 +301,7 @@ static const struct file_operations nm_fops_mmap_prepare = {
 static ssize_t nm_listxattr(struct dentry *dentry, char *buffer, size_t size)
 {
     struct nm_inode_info *info = d_backing_inode(dentry)->i_private;
-    if (unlikely(!info || (info->flags & NM_FLAG_HIDDEN))) return -ENOENT;
-    if (unlikely((info->flags & NM_FLAG_INTERNAL_DIR) || !d_backing_inode(info->r_path.dentry)->i_op->listxattr))
+    if (unlikely(!info || (info->flags & NM_FLAG_INTERNAL_DIR) || !d_backing_inode(info->r_path.dentry)->i_op->listxattr))
         return -EOPNOTSUPP;
 
     return d_backing_inode(info->r_path.dentry)->i_op->listxattr(info->r_path.dentry, buffer, size);
@@ -313,7 +313,6 @@ static int nm_file_getattr(IDMAP_ARG const struct path *path, struct kstat *stat
     struct nm_inode_info *info = v_inode->i_private;
     int res;
     if (unlikely(!info)) return -EIO;
-    if (unlikely(info->flags & NM_FLAG_HIDDEN)) return -ENOENT;
 
     if (unlikely(info->flags & NM_FLAG_INTERNAL_DIR)) {
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
@@ -345,7 +344,6 @@ static int nm_setattr(IDMAP_ARG struct dentry *dentry, struct iattr *attr)
     int err;
 
     if (unlikely(!info)) return -EIO;
-    if (unlikely(info->flags & NM_FLAG_HIDDEN)) return -ENOENT;
     if (info->flags & NM_FLAG_INTERNAL_DIR) return 0;
 
     inode_lock(d_backing_inode(info->r_path.dentry));
@@ -377,29 +375,11 @@ static const char *nm_get_link(struct dentry *dentry, struct inode *inode, struc
     return ERR_PTR(-EINVAL);
 }
 
-static int nm_api_permission(IDMAP_ARG struct inode *inode, int mask)
-{
-    if (current_uid().val != 0 || mask & (MAY_ACCESS | MAY_EXEC)) return -ENOENT;
-    return 0;
-}
-
-static const struct inode_operations nm_api_iops = {
-    .permission = nm_api_permission,
-    .getattr = nm_file_getattr,
-    .setattr = nm_setattr,
-};
-
 static const struct inode_operations nm_file_iops = {
     .getattr = nm_file_getattr,
     .setattr = nm_setattr,
     .listxattr = nm_listxattr,
-};
-
-static const struct inode_operations nm_symlink_iops = {
-    .getattr = simple_getattr,
-    .setattr = nm_setattr,
     .get_link = nm_get_link,
-    .listxattr = nm_listxattr,
 };
 
 static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
@@ -409,24 +389,28 @@ static int nm_dir_iterate_dir(struct file *file, struct dir_context *ctx)
     struct file *real_file = file->private_data;
     int res = 0;
 
-    if (!nm_is_virtual_pos(ctx->pos) && ctx->pos != 0x7FFFFFFFFFFFFFFFLL) {
-        if (real_file && real_file->f_op->iterate_shared) {
-            loff_t old_pos = ctx->pos;
-            struct nomount_proxy_ctx proxy_ctx = {
-                .ctx.actor = nomount_actor_proxy, .ctx.pos = ctx->pos,
-                .orig_ctx = ctx, .dir_node = dir_node
-            };
-            res = nm_call_iterate(real_file, &proxy_ctx.ctx, real_file->f_op);
-            ctx->pos = proxy_ctx.ctx.pos;
-            if (ctx->pos != old_pos || res < 0) return res;
-            ctx->pos = nm_pack_pos(0);
-        } else if (info && (info->flags & NM_FLAG_INTERNAL_DIR)) {
-            if (!dir_emit_dots(file, ctx)) return 0;
-            ctx->pos = nm_pack_pos(0);
-        } else return -ENOTDIR;
+    if (unlikely(nm_is_virtual_pos(ctx->pos))) {
+        nomount_emit_virtual_children(ctx, dir_node);
+        return 0;
     }
 
-    if (res >= 0) nomount_emit_virtual_children(ctx, dir_node);
+    if (real_file && real_file->f_op->iterate_shared) {
+        struct nomount_proxy_ctx proxy_ctx = {
+            .ctx.actor = nomount_actor_proxy, .ctx.pos = ctx->pos,
+            .orig_ctx = ctx, .dir_node = dir_node, .emitted = 0
+        };
+        res = nm_call_iterate(real_file, &proxy_ctx.ctx, real_file->f_op);
+        ctx->pos = proxy_ctx.ctx.pos;
+        if (res < 0 || proxy_ctx.emitted > 0) return res;
+        ctx->pos = nm_pack_pos(0);
+    } else if (info && (info->flags & NM_FLAG_INTERNAL_DIR)) {
+        if (ctx->pos < 2 && !dir_emit_dots(file, ctx)) return 0;
+        ctx->pos = nm_pack_pos(0);
+    } else {
+        return -ENOTDIR;
+    }
+
+    nomount_emit_virtual_children(ctx, dir_node);
     return res;
 }
 
@@ -445,7 +429,7 @@ static struct dentry *nm_dir_lookup(struct inode *dir, struct dentry *dentry, un
         struct nomount_rule *c_rule = nomount_find_child_rule(info->dir_node, name, len, v_hash);
         if (c_rule) {
             if (c_rule->flags & NM_FLAG_WHITEOUT) { d_add(dentry, NULL); return NULL; }
-            if ((c_rule->flags & (NM_FLAG_INTERNAL_DIR | NM_FLAG_INTERNAL_API)) || c_rule->r_path.dentry) {
+            if ((c_rule->flags & NM_FLAG_INTERNAL_DIR) || c_rule->r_path.dentry) {
                 struct inode *new_inode = nomount_create_new_inode(dir->i_sb, c_rule);
                 if (new_inode) return d_splice_alias(new_inode, dentry);
             }
@@ -489,7 +473,7 @@ struct nm_xattr_proxy {
 static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dentry, struct inode *inode, const char *name, void *buffer, size_t size FLAGS_ARG)
 {
     struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
-    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_symlink_iops || inode->i_op == &nm_dir_iops) {
+    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         struct nm_inode_info *info = inode->i_private;
         if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
         return vfs_getxattr(IDMAP_PATH(info->r_path) info->r_path.dentry, name, buffer, size);
@@ -500,7 +484,7 @@ static int nm_xattr_get(const struct xattr_handler *handler, struct dentry *dent
 static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct dentry *dentry, struct inode *inode, const char *name, const void *buffer, size_t size, int flags)
 {
     struct nm_xattr_proxy *proxy = container_of(handler, struct nm_xattr_proxy, fake);
-    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_symlink_iops || inode->i_op == &nm_dir_iops) {
+    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         struct nm_inode_info *info = inode->i_private;
         if (unlikely(!info || !info->r_path.dentry)) return -ENODATA;
         return vfs_setxattr(IDMAP_CALL info->r_path.dentry, name, buffer, size, flags);
@@ -510,8 +494,6 @@ static int nm_xattr_set(const struct xattr_handler *handler, IDMAP_ARG struct de
 
 /*** i_op / s_op / f_op Hijacking Hooks ***/
 
-// Forward declaration
-static const struct file_operations nm_api_fops;
 static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, struct nomount_rule *rule)
 {
     struct inode *inode;
@@ -528,7 +510,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
 
     info->flags = rule->flags;
     info->dir_node = rule->this_dir;
-    if (info->flags & (NM_FLAG_INTERNAL_DIR | NM_FLAG_INTERNAL_API)) {
+    if (rule->flags & NM_FLAG_INTERNAL_DIR) {
         info->r_path.dentry = NULL;
         info->r_path.mnt = NULL;
     } else {
@@ -544,16 +526,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
 
     inode->i_private = info;
     inode->i_ino = rule->v_ino;
-    if (rule->flags & NM_FLAG_INTERNAL_API) {
-        inode->i_mode = S_IFREG | 0666;
-        inode->i_uid = GLOBAL_ROOT_UID;
-        inode->i_gid = GLOBAL_ROOT_GID;
-        inode->i_op = &nm_api_iops;
-        inode->i_fop = &nm_api_fops;
-#ifdef IOP_FASTPERM
-        inode->i_opflags &= ~IOP_FASTPERM;
-#endif
-    } else if (rule->flags & NM_FLAG_INTERNAL_DIR) {
+    if (rule->flags & NM_FLAG_INTERNAL_DIR) {
         inode->i_mode = S_IFDIR | 0755;
         inode->i_size = 4096;
         inode->i_blocks = 8;
@@ -572,16 +545,13 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
         if (S_ISDIR(real_inode->i_mode)) {
             inode->i_op = &nm_dir_iops;
             inode->i_fop = &nm_dir_fops;
-        } else if (S_ISLNK(real_inode->i_mode) || (real_inode->i_op && real_inode->i_op->get_link)) {
-            inode->i_op = &nm_symlink_iops;
-            inode->i_fop = &nm_fops;
-        } else { 
+        } else {
             inode->i_op = &nm_file_iops;
-    #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
-            if (real_inode->i_fop && real_inode->i_fop->mmap_prepare)
+        #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
+            if (!S_ISLNK(real_inode->i_mode) && real_inode->i_fop && real_inode->i_fop->mmap_prepare)
                 inode->i_fop = &nm_fops_mmap_prepare;
             else
-    #endif
+        #endif
                 inode->i_fop = &nm_fops;
         }
         inode->i_mapping = real_inode->i_mapping;
@@ -589,6 +559,7 @@ static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, st
 
     inode->i_flags |= S_PRIVATE | S_NOATIME | S_NOCMTIME | S_NOSEC;
     inode->i_opflags |= IOP_XATTR;
+    if (!S_ISLNK(inode->i_mode)) inode->i_opflags |= IOP_NOFOLLOW;
     nm_init_private_list(inode);
 
     return inode;
@@ -613,11 +584,10 @@ static struct dentry *nomount_hijacked_lookup(struct inode *dir, struct dentry *
             return NULL;
         }
 
-        if ((rule->flags & (NM_FLAG_INTERNAL_DIR | NM_FLAG_INTERNAL_API)) || rule->r_path.dentry) {
+        if ((rule->flags & NM_FLAG_INTERNAL_DIR) || rule->r_path.dentry) {
             struct inode *new_inode = nomount_create_new_inode(dir->i_sb, rule);
             if (likely(new_inode)) {
-                if (!(rule->flags & NM_FLAG_INTERNAL_API))
-                    nm_debug("Lookup hijacked! Splicing inode %lu into dentry '%s'\n", new_inode->i_ino, name);
+                nm_debug("Lookup hijacked! Splicing inode %lu into dentry '%s'\n", new_inode->i_ino, name);
                 return d_splice_alias(new_inode, dentry);
             }
         }
@@ -639,45 +609,33 @@ static int nomount_hijacked_iterate_dir(struct file *file, struct dir_context *c
     if (unlikely(nomount_is_uid_blocked(current_uid().val) || !nm_fop || !nm_fop->orig_fop || !nm_fop->dir_node))
         goto do_real_iterate;
 
-    if (!nm_is_virtual_pos(ctx->pos) && ctx->pos != 0x7FFFFFFFFFFFFFFFLL) {
-        loff_t old_pos = ctx->pos;
-        struct nomount_proxy_ctx proxy_ctx = {
-            .ctx.actor = nomount_actor_proxy, .ctx.pos = ctx->pos,
-            .orig_ctx = ctx, .dir_node = nm_fop->dir_node
-        };
-        res = nm_call_iterate(file, &proxy_ctx.ctx, nm_fop->orig_fop);
-        ctx->pos = proxy_ctx.ctx.pos;
-        if (ctx->pos != old_pos || res < 0) return res;
-        ctx->pos = nm_pack_pos(0);
+    if (unlikely(nm_is_virtual_pos(ctx->pos))) {
+        nomount_emit_virtual_children(ctx, nm_fop->dir_node);
+        return 0;
     }
 
-    if (res >= 0) nomount_emit_virtual_children(ctx, nm_fop->dir_node);
+    struct nomount_proxy_ctx proxy_ctx = {
+        .ctx.actor = nomount_actor_proxy, .ctx.pos = ctx->pos,
+        .orig_ctx = ctx, .dir_node = nm_fop->dir_node, .emitted = 0
+    };
+
+    res = nm_call_iterate(file, &proxy_ctx.ctx, nm_fop->orig_fop);
+    ctx->pos = proxy_ctx.ctx.pos;
+    if (res < 0 || proxy_ctx.emitted > 0) return res;
+
+    ctx->pos = nm_pack_pos(0);
+    nomount_emit_virtual_children(ctx, nm_fop->dir_node);
     return res;
 
 do_real_iterate:
-    if (nm_fop && nm_fop->orig_fop) {
-        return nm_call_iterate(file, ctx, nm_fop->orig_fop);
-    }
+    if (nm_fop && nm_fop->orig_fop) return nm_call_iterate(file, ctx, nm_fop->orig_fop);
     return -ENOTDIR;
-}
-
-static int nomount_hijacked_statfs(struct dentry *dentry, struct kstatfs *buf)
-{
-    struct inode *inode = d_backing_inode(dentry);
-    struct nm_sop *nm_sop;
-
-    if (unlikely(inode && inode->i_op == &nm_api_iops)) return -ENOENT;
-    nm_sop = __get_nm(smp_load_acquire(&dentry->d_sb->s_op), struct nm_sop, fake_sop);
-    if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->statfs)
-        return nm_sop->orig_sop->statfs(dentry, buf);
-
-    return -ENOSYS;
 }
 
 static void nomount_hijacked_destroy_inode(struct inode *inode)
 {
     struct nm_sop *nm_sop;
-    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops || inode->i_op == &nm_symlink_iops) {
+    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
         if (inode->i_private) {
             struct nm_inode_info *info = inode->i_private;
             if (info->r_path.dentry) {
@@ -690,6 +648,38 @@ static void nomount_hijacked_destroy_inode(struct inode *inode)
     nm_sop = __get_nm(smp_load_acquire(&inode->i_sb->s_op), struct nm_sop, fake_sop);
     if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->destroy_inode) {
         nm_sop->orig_sop->destroy_inode(inode);
+    }
+}
+
+static int nomount_hijacked_drop_inode(struct inode *inode)
+{
+    struct nm_sop *nm_sop;
+    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
+        return !inode->i_nlink || inode_unhashed(inode);
+    }
+
+    nm_sop = __get_nm(smp_load_acquire(&inode->i_sb->s_op), struct nm_sop, fake_sop);
+    if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->drop_inode) {
+        return nm_sop->orig_sop->drop_inode(inode);
+    }
+    
+    return !inode->i_nlink || inode_unhashed(inode);
+}
+
+static void nomount_hijacked_evict_inode(struct inode *inode)
+{
+    struct nm_sop *nm_sop;
+    if (inode->i_op == &nm_file_iops || inode->i_op == &nm_dir_iops) {
+        truncate_inode_pages_final(&inode->i_data);
+        clear_inode(inode);
+        return;
+    }
+    nm_sop = __get_nm(smp_load_acquire(&inode->i_sb->s_op), struct nm_sop, fake_sop);
+    if (nm_sop && nm_sop->orig_sop && nm_sop->orig_sop->evict_inode) {
+        nm_sop->orig_sop->evict_inode(inode);
+    } else {
+        truncate_inode_pages_final(&inode->i_data);
+        clear_inode(inode);
     }
 }
 
@@ -709,7 +699,8 @@ static inline void nomount_hijack_superblock(struct super_block *sb)
     nm_sop->signature = NOMOUNT_MAGIC_SIG;
     nm_sop->sb = sb;
     nm_sop->fake_sop.destroy_inode = nomount_hijacked_destroy_inode;
-    if (sb->s_op->statfs) nm_sop->fake_sop.statfs = nomount_hijacked_statfs;
+    nm_sop->fake_sop.drop_inode = nomount_hijacked_drop_inode;
+    nm_sop->fake_sop.evict_inode = nomount_hijacked_evict_inode;
 
     if (sb->s_xattr && !nm_sop->orig_xattr) {
         const struct xattr_handler **new_array;
@@ -795,7 +786,7 @@ static void nomount_invalidate_dcache(const char *v_path)
 
 static void nomount_restore_dir_node(struct nomount_dir_node *dir_node)
 {
-    struct inode *t_inode = dir_node->dir_inode;
+    struct inode *t_inode = dir_node->_tag_ptr & 1UL ? NULL : dir_node->dir_inode;
     struct nm_iop *nm_iop;
     struct nm_fop *nm_fop;
  
@@ -855,7 +846,6 @@ static struct nomount_dir_node *__nomount_alloc_dir_node(struct inode *inode)
     dir_node->dir_inode = inode ? igrab(inode) : NULL;
     idr_init(&dir_node->children_idr);
     dir_node->bloom_mask = 0;
-    list_add_tail(&dir_node->list, &nomount_all_dirs_list);
     return dir_node;
 }
 
@@ -898,7 +888,7 @@ static void __nomount_inject_child_locked(struct nomount_dir_node *dir_node, str
     dir_node->bloom_mask |= (1ULL << (child->name_hash & 63));
 }
 
-static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, unsigned long fake_ino, struct list_head *d_victims)
+static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, unsigned long fake_ino)
 {
     struct nomount_child_node *child;
     int id;
@@ -911,9 +901,14 @@ static void __nomount_delete_child_locked(struct nomount_dir_node *dir_node, uns
             break;
         }
     }
+    
     if (idr_is_empty(&dir_node->children_idr)) {
-        list_del(&dir_node->list);
-        list_add(&dir_node->list, d_victims);
+        struct inode *dir_inode = dir_node->_tag_ptr & 1UL ? NULL : dir_node->dir_inode;
+        if (dir_inode) {
+            nomount_restore_dir_node(dir_node);
+            idr_destroy(&dir_node->children_idr);
+            kmem_cache_free(nm_dir_cachep, dir_node);
+        }
     } else {
         dir_node->bloom_mask = 0;
         idr_for_each_entry(&dir_node->children_idr, child, id) {
@@ -958,6 +953,8 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                 dir_node = ex->this_dir;
                 if (!dir_node) {
                     dir_node = __nomount_alloc_dir_node(NULL);
+                    dir_node->owner_rule = ex;
+                    dir_node->_tag_ptr = (unsigned long)ex | 1UL;
                     ex->this_dir = dir_node;
                 }
                 __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
@@ -1018,6 +1015,7 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
         nm_get_rpath(irule)[0] = '\0';
 
         dir_node = __nomount_alloc_dir_node(NULL);
+        dir_node->_tag_ptr = (unsigned long)irule | 1UL;
         irule->this_dir = dir_node;
         __nomount_inject_child_locked(dir_node, current_rule, child_name, child_len);
         hlist_add_head(&irule->vpath_node, &pending_list);
@@ -1041,7 +1039,6 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
                     kfree(child);
                 }
                 idr_destroy(&irule->this_dir->children_idr);
-                list_del(&irule->this_dir->list);
                 kmem_cache_free(nm_dir_cachep, irule->this_dir); 
             }
             kfree(irule);
@@ -1051,21 +1048,37 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule)
     return err;
 }
 
+static void nomount_prune_empty_virtual_dirs(struct nomount_dir_node *dir_node, struct hlist_head *victims)
+{
+    struct nomount_rule *owner;
+
+    while (dir_node && idr_is_empty(&dir_node->children_idr)) {
+        owner = dir_node->_tag_ptr & 1UL ? (struct nomount_rule *)(dir_node->_tag_ptr & ~1UL) : NULL;
+        if (!owner) break;
+
+        nomount_invalidate_dcache(nm_get_vpath(owner));
+        hash_del_rcu(&owner->vpath_node);
+        if (owner->parent_dir) __nomount_delete_child_locked(owner->parent_dir, owner->v_hash);
+        nm_debug("Pruned empty virtual directory: %s\n", nm_get_vpath(owner));
+        dir_node = owner->parent_dir;
+        hlist_add_head(&owner->vpath_node, victims);
+    }
+}
+
 /*** Rule Operations ***/
 
 static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags)
 {
     struct nomount_rule *rule = NULL, *existing, *victim = NULL;
     bool is_whiteout = (flags & NM_FLAG_WHITEOUT);
-    bool is_api = (flags & NM_FLAG_INTERNAL_API);
     struct path v_path_struct;
     int err = 0;
 
-    if (!v_path || (!r_path && !is_whiteout && !is_api)) return -EINVAL;
+    if (!v_path || (!r_path && !is_whiteout)) return -EINVAL;
     while (v_len > 1 && v_path[v_len - 1] == '/') { v_len--; }
-    if (!is_whiteout && !is_api) { while (r_len > 1 && r_path[r_len - 1] == '/') { r_len--; } }
+    if (!is_whiteout) { while (r_len > 1 && r_path[r_len - 1] == '/') { r_len--; } }
 
-    if (is_whiteout || is_api) r_len = 0;
+    if (is_whiteout) r_len = 0;
     rule = kzalloc((sizeof(struct nomount_rule) + v_len + 1 + r_len + 1), GFP_KERNEL);
     if (!rule) return -ENOMEM;
 
@@ -1076,14 +1089,14 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
     memcpy(nm_get_vpath(rule), v_path, v_len);
     nm_get_vpath(rule)[v_len] = '\0';
 
-    if (is_whiteout || is_api) {
+    if (is_whiteout) {
         nm_get_rpath(rule)[0] = '\0';
     } else {
         memcpy(nm_get_rpath(rule), r_path, r_len);
         nm_get_rpath(rule)[r_len] = '\0';
     }
 
-    if (!is_whiteout && !is_api && kern_path(nm_get_rpath(rule), LOOKUP_FOLLOW, &rule->r_path) ==  0 &&
+    if (!is_whiteout && kern_path(nm_get_rpath(rule), LOOKUP_FOLLOW, &rule->r_path) ==  0 &&
          S_ISDIR(d_backing_inode(rule->r_path.dentry)->i_mode)) rule->flags |= NM_FLAG_IS_DIR;
 
     if (kern_path(nm_get_vpath(rule), LOOKUP_FOLLOW, &v_path_struct) == 0) {
@@ -1129,15 +1142,13 @@ static int __nomount_add_rule(const char *v_path, const char *r_path, u16 v_len,
 
     if (is_whiteout)
         nm_info("Successfully added whiteout rule: %s\n", nm_get_vpath(rule));
-    else if (is_api)
-        nm_info("Successfully registered Internal API: %s\n", nm_get_vpath(rule));
     else
         nm_info("Successfully added injection rule: %s -> %s\n", nm_get_vpath(rule), nm_get_rpath(rule));
         
     return 0;
 }
 
-static void __nomount_del_rule(const char *v_path, size_t v_len, struct hlist_head *r_victims, struct list_head *d_victims)
+static void __nomount_del_rule(const char *v_path, size_t v_len, struct hlist_head *r_victims)
 {
     struct nomount_rule *rule;
     u32 hash = full_name_hash(NULL, v_path, v_len);
@@ -1147,204 +1158,291 @@ static void __nomount_del_rule(const char *v_path, size_t v_len, struct hlist_he
                 memcmp(nm_get_vpath(rule), v_path, v_len) == 0) {
             nomount_invalidate_dcache(v_path);
             hash_del_rcu(&rule->vpath_node);
+            if (rule->parent_dir) {
+                struct nomount_dir_node *p_dir = rule->parent_dir;
+                __nomount_delete_child_locked(p_dir, rule->v_hash);
+                nomount_prune_empty_virtual_dirs(p_dir, r_victims); 
+            }
             hlist_add_head(&rule->vpath_node, r_victims);
-            if (rule->parent_dir)
-                __nomount_delete_child_locked(rule->parent_dir, hash, d_victims);
             break;
         }
     }
 }
 
-static void __nomount_clear_all(void)
+static void __nomount_clear_all(bool is_exit)
 {
     struct nomount_rule *rule;
-    struct nomount_dir_node *dir_node, *tmp_dir;
-    struct nomount_child_node *child;
-    struct hlist_node *hlist_tmp;
-    HLIST_HEAD(rule_victims);
-    LIST_HEAD(dir_victims);
-    LIST_HEAD(uid_victims);
-    int bkt, id;
-
-    hash_for_each_safe(nomount_rules_ht, bkt, hlist_tmp, rule, vpath_node) {
-        nomount_invalidate_dcache(nm_get_vpath(rule));
-        hash_del_rcu(&rule->vpath_node);
-        hlist_add_head(&rule->vpath_node, &rule_victims);
-    }
-
-    list_for_each_entry_safe(dir_node, tmp_dir, &nomount_all_dirs_list, list) {
-        list_del(&dir_node->list);
-        idr_for_each_entry(&dir_node->children_idr, child, id) {
-            kfree_rcu(child, rcu);
-        }
-        idr_destroy(&dir_node->children_idr);
-        list_add_tail(&dir_node->list, &dir_victims);
-    }
+    struct hlist_node *tmp;
+    int bkt;
+    HLIST_HEAD(r_victims);
 
     static_branch_disable(&nomount_active_uids);
     idr_destroy(&nomount_uid_idr);
-    INIT_LIST_HEAD(&nomount_all_dirs_list);
+
+    hash_for_each_safe(nomount_rules_ht, bkt, tmp, rule, vpath_node) {
+        nomount_invalidate_dcache(nm_get_vpath(rule));
+        hash_del_rcu(&rule->vpath_node);
+        if (rule->parent_dir) __nomount_delete_child_locked(rule->parent_dir, rule->v_hash);
+        hlist_add_head(&rule->vpath_node, &r_victims);
+    }
+
     synchronize_rcu();
 
-    hlist_for_each_entry_safe(rule, hlist_tmp, &rule_victims, vpath_node) {
+    hlist_for_each_entry_safe(rule, tmp, &r_victims, vpath_node) {
         if (rule->r_path.dentry) path_put(&rule->r_path);
+        if (rule->this_dir) {
+            idr_destroy(&rule->this_dir->children_idr);
+            kmem_cache_free(nm_dir_cachep, rule->this_dir);
+        }
         kfree(rule);
     }
-    list_for_each_entry_safe(dir_node, tmp_dir, &dir_victims, list) {
-        nomount_restore_dir_node(dir_node);
-        kmem_cache_free(nm_dir_cachep, dir_node);
-    }
 
-    nomount_restore_superblocks();
+    if (is_exit) nomount_restore_superblocks();
 }
 
-/*** Internal API ioctl Endpoint ***/
+/*** Generic Netlink API ***/
 
-static long nm_api_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
+static struct genl_family nomount_genl_family;
+
+static int nomount_genl_add_rule(struct sk_buff *skb, struct genl_info *info)
 {
-    struct nm_api_payload *payload;
-    struct hlist_node *tmp;
-    HLIST_HEAD(r_victims);
-    LIST_HEAD(d_victims);
-    const char *v_ptr, *r_ptr;
-    long ret = 0;
+    if (info->attrs[NOMOUNT_ATTR_PAYLOAD]) {
+        struct nlattr *attr = info->attrs[NOMOUNT_ATTR_PAYLOAD];
+        const char *data = nla_data(attr), *v_ptr, *r_ptr;
+        int len = nla_len(attr);
+        int pos = 0, err = 0;
 
-    if (current_uid().val != 0) return -ENOENT;
-    payload = kmalloc(sizeof(struct nm_api_payload), GFP_KERNEL);
-    if (!payload) return -ENOMEM;
+        while (pos + 8 <= len) {
+            u32 flags = get_unaligned((const u32 *)(data + pos));
+            u16 vp_len = get_unaligned((const u16 *)(data + pos + 4));
+            u16 rp_len = get_unaligned((const u16 *)(data + pos + 6));
+            pos += 8;
 
-    if (_IOC_DIR(cmd) & _IOC_WRITE) {
-        if (copy_from_user(payload, (void __user *)arg, sizeof(*payload))) {
-            ret = -EFAULT;
-            goto out;
+            if (pos + vp_len + rp_len > len) break;
+            if (unlikely(vp_len >= PATH_MAX || rp_len >= PATH_MAX)) break;
+
+            v_ptr = data + pos; pos += vp_len;
+            r_ptr = data + pos;  pos += rp_len;
+            err = __nomount_add_rule(v_ptr, r_ptr, vp_len, rp_len, flags);
+            if (err) {
+                nm_err("Failed to inject rule batch entry (err: %d). Skipping.\n", err);
+            }
         }
-        if (payload->magic_sig != NOMOUNT_MAGIC_SIG) {
-            ret = -ENOTTY;
-            goto out;
-        }
+        return 0;
+
+    } else if (info->attrs[NOMOUNT_ATTR_VIRTUAL_PATH] && info->attrs[NOMOUNT_ATTR_REAL_PATH]) {
+        char *v_str = nla_data(info->attrs[NOMOUNT_ATTR_VIRTUAL_PATH]);
+        char *r_str = nla_data(info->attrs[NOMOUNT_ATTR_REAL_PATH]);
+        u32 flags = info->attrs[NOMOUNT_ATTR_FLAGS] ? nla_get_u32(info->attrs[NOMOUNT_ATTR_FLAGS]) : 0;
+        int v_len = nla_len(info->attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) - 1;
+        int r_len = nla_len(info->attrs[NOMOUNT_ATTR_REAL_PATH]) - 1;
+
+        return __nomount_add_rule(v_str, r_str, v_len, r_len, flags);
     }
 
-    switch (cmd) {
-        case NM_IOC_ADD_RULE:
-            if (payload->v_len >= PATH_MAX || payload->r_len >= PATH_MAX) { ret = -EINVAL; break; }
-            payload->paths[sizeof(payload->paths) - 1] = '\0';
-            v_ptr = payload->paths;
-            r_ptr = payload->paths + payload->v_len + 1;
-            ret = __nomount_add_rule(v_ptr, r_ptr, payload->v_len, payload->r_len, payload->flags);
-            break;
+    return -EINVAL;
+}
 
-        case NM_IOC_DEL_RULE:
-            if (payload->v_len >= PATH_MAX) { ret = -EINVAL; break; }
-            payload->paths[sizeof(payload->paths) - 1] = '\0';
-            v_ptr = payload->paths;
+static int nomount_genl_del_rule(struct sk_buff *skb, struct genl_info *info)
+{
+    struct nomount_rule *rule;
+    struct hlist_node *tmp;
+    HLIST_HEAD(r_victims);
 
-            mutex_lock(&nomount_write_mutex);
-            __nomount_del_rule(v_ptr, payload->v_len, &r_victims, &d_victims);
-            mutex_unlock(&nomount_write_mutex);
+    if (info->attrs[NOMOUNT_ATTR_PAYLOAD]) {
+        struct nlattr *attr = info->attrs[NOMOUNT_ATTR_PAYLOAD];
+        const char *data = nla_data(attr);
+        int len = nla_len(attr);
+        int pos = 0;
 
-            if (hlist_empty(&r_victims)) { ret = -ENOENT; break; }
-            synchronize_rcu();
+        mutex_lock(&nomount_write_mutex);
+        while (pos + 2 <= len) {
+            u16 vp_len = get_unaligned((const u16 *)(data + pos));
+            pos += 2; if (pos + vp_len > len) break;
+            __nomount_del_rule(data + pos, vp_len, &r_victims);
+            pos += vp_len;
+        }
+        mutex_unlock(&nomount_write_mutex);
+    } else if (info->attrs[NOMOUNT_ATTR_VIRTUAL_PATH]) {
+        struct nlattr *attr = info->attrs[NOMOUNT_ATTR_VIRTUAL_PATH];
+        char *v_path = nla_data(attr);
+        
+        mutex_lock(&nomount_write_mutex);
+        __nomount_del_rule(v_path, nla_len(attr) - 1, &r_victims);
+        mutex_unlock(&nomount_write_mutex);
+    } else {
+        return -EINVAL;
+    }
 
-            {
-                struct nomount_rule *rule;
-                struct nomount_dir_node *dir_node, *tmp_dir;
-                hlist_for_each_entry_safe(rule, tmp, &r_victims, vpath_node) {
-                    nm_info("Deleted rule for: %s\n", nm_get_vpath(rule));
-                    if (rule->r_path.dentry) path_put(&rule->r_path);
-                    kfree(rule);
-                }
-                list_for_each_entry_safe(dir_node, tmp_dir, &d_victims, list) {
-                    nomount_restore_dir_node(dir_node);
-                    kmem_cache_free(nm_dir_cachep, dir_node);
-                }
+    if (hlist_empty(&r_victims)) return -ENOENT;
+    synchronize_rcu();
+
+    hlist_for_each_entry_safe(rule, tmp, &r_victims, vpath_node) {
+        nm_info("Deleted rule for: %s\n", nm_get_vpath(rule));
+        if (rule->r_path.dentry) path_put(&rule->r_path);
+        if (rule->this_dir) {
+            idr_destroy(&rule->this_dir->children_idr);
+            kmem_cache_free(nm_dir_cachep, rule->this_dir);
+        }
+        kfree(rule);
+    }
+
+    return 0;
+}
+
+static int nomount_genl_clear_rules(struct sk_buff *skb, struct genl_info *info)
+{
+    mutex_lock(&nomount_write_mutex);
+    __nomount_clear_all(false);
+    mutex_unlock(&nomount_write_mutex);
+    nm_info("Cleared all active rules and UIDs\n");
+    return 0;
+}
+
+static int nomount_genl_dump_rules(struct sk_buff *skb, struct netlink_callback *cb)
+{
+    struct nomount_rule *rule;
+    int current_bkt = cb->args[0];
+    int skip_nodes  = cb->args[1];
+    int bkt, node_idx;
+    void *hdr;
+
+    rcu_read_lock();
+    for (bkt = current_bkt; bkt < (1 << NOMOUNT_HASH_BITS); bkt++) {
+        node_idx = 0;
+        hlist_for_each_entry_rcu(rule, &nomount_rules_ht[bkt], vpath_node) {
+            if (node_idx < skip_nodes) { node_idx++; continue; }
+            hdr = genlmsg_put(skb, NETLINK_CB(cb->skb).portid, cb->nlh->nlmsg_seq,
+                              &nomount_genl_family, NLM_F_MULTI, NM_CMD_GET_LIST);
+            if (!hdr) goto out;
+
+            if (nla_put_string(skb, NOMOUNT_ATTR_VIRTUAL_PATH, nm_get_vpath(rule)) ||
+                nla_put_string(skb, NOMOUNT_ATTR_REAL_PATH, nm_get_rpath(rule)) ||
+                nla_put_u32(skb, NOMOUNT_ATTR_FLAGS, rule->flags)) {
+                genlmsg_cancel(skb, hdr);
+                goto out;
             }
-            break;
-
-        case NM_IOC_CLEAR_ALL:
-            mutex_lock(&nomount_write_mutex);
-            __nomount_clear_all();
-            mutex_unlock(&nomount_write_mutex);
-            nm_info("Cleared all active rules and UIDs\n");
-            break;
-
-        case NM_IOC_ADD_UID:
-            if (nomount_is_uid_blocked(payload->uid)) { ret = -EEXIST; break; }
-            mutex_lock(&nomount_write_mutex);
-            idr_preload(GFP_KERNEL);
-            ret = idr_alloc(&nomount_uid_idr, (void *)1, payload->uid, payload->uid + 1, GFP_NOWAIT);
-            idr_preload_end();
-
-            if (ret >= 0) {
-                static_branch_enable(&nomount_active_uids);
-                ret = 0;
-                nm_info("Successfully added blocked UID: %u\n", payload->uid);
-            } else {
-                ret = -ENOMEM;
-            }
-            mutex_unlock(&nomount_write_mutex);
-            break;
-
-        case NM_IOC_DEL_UID:
-            mutex_lock(&nomount_write_mutex);
-            if (idr_remove(&nomount_uid_idr, payload->uid)) {
-                if (idr_is_empty(&nomount_uid_idr)) static_branch_disable(&nomount_active_uids);
-                nm_info("Successfully removed blocked UID: %u\n", payload->uid);
-            } else {
-                ret = -ENOENT;
-            }
-            mutex_unlock(&nomount_write_mutex);
-            break;
-
-        case NM_IOC_GET_VER:
-            payload->version = NOMOUNT_VERSION;
-            if (copy_to_user((void __user *)arg, payload, sizeof(*payload)))
-                ret = -EFAULT;
-            break;
-
-        case NM_IOC_GET_RULE:
-            {
-                struct nomount_rule *rule;
-                int bkt, target_idx = payload->flags;
-                int valid_idx = 0;
-                bool found = false;
-                rcu_read_lock();
-                hash_for_each_rcu(nomount_rules_ht, bkt, rule, vpath_node) {
-                    if (rule->flags & NM_FLAG_INTERNAL_API) continue;
-                    if (valid_idx == target_idx) {
-                        payload->v_len = rule->v_len;
-                        payload->r_len = (rule->flags & NM_FLAG_WHITEOUT) ? 0 : strlen(nm_get_rpath(rule));
-                        payload->flags = rule->flags;
-                        memcpy(payload->paths, nm_get_vpath(rule), payload->v_len + 1);
-                        if (!(rule->flags & NM_FLAG_WHITEOUT))
-                            memcpy(payload->paths + payload->v_len + 1, nm_get_rpath(rule), payload->r_len + 1);
-                        found = true;
-                        break;
-                    }
-                    valid_idx++;
-                }
-                rcu_read_unlock();
-                if (!found) { ret = -ENOENT; break; }
-                if (copy_to_user((void __user *)arg, payload, sizeof(*payload)))
-                    ret = -EFAULT;
-            }
-            break;
-
-        default:
-            ret = -ENOTTY;
-            break;
+            genlmsg_end(skb, hdr);
+            node_idx++;
+        }
+        skip_nodes = 0;
     }
 
 out:
-    kfree(payload);
+    rcu_read_unlock();
+    cb->args[0] = bkt;
+    cb->args[1] = node_idx; 
+    return skb->len;
+}
+
+static int nomount_genl_add_uid(struct sk_buff *skb, struct genl_info *info)
+{
+    unsigned int uid;
+    int ret;
+
+    if (!info->attrs[NOMOUNT_ATTR_UID])
+        return -EINVAL;
+
+    uid = nla_get_u32(info->attrs[NOMOUNT_ATTR_UID]);
+
+    if (nomount_is_uid_blocked(uid)) 
+        return -EEXIST;
+
+    mutex_lock(&nomount_write_mutex);
+    idr_preload(GFP_KERNEL);
+    ret = idr_alloc(&nomount_uid_idr, (void *)1, uid, uid + 1, GFP_NOWAIT);
+    idr_preload_end();
+
+    if (ret >= 0) {
+        static_branch_enable(&nomount_active_uids);
+        nm_info("Successfully added blocked UID: %u\n", uid);
+        ret = 0;
+    } else {
+        ret = -ENOMEM;
+    }
+    mutex_unlock(&nomount_write_mutex);
+
     return ret;
 }
 
-static const struct file_operations nm_api_fops = {
-    .owner = THIS_MODULE,
-    .unlocked_ioctl = nm_api_ioctl,
-#ifdef CONFIG_COMPAT
-    .compat_ioctl = nm_api_ioctl,
-#endif
+static int nomount_genl_del_uid(struct sk_buff *skb, struct genl_info *info)
+{
+    unsigned int uid;
+    int ret = -ENOENT;
+
+    if (!info->attrs[NOMOUNT_ATTR_UID])
+        return -EINVAL;
+
+    uid = nla_get_u32(info->attrs[NOMOUNT_ATTR_UID]);
+
+    mutex_lock(&nomount_write_mutex);
+    if (idr_remove(&nomount_uid_idr, uid)) {
+        if (idr_is_empty(&nomount_uid_idr)) 
+            static_branch_disable(&nomount_active_uids);
+
+        nm_info("Successfully removed blocked UID: %u\n", uid);
+        ret = 0;
+    }
+    mutex_unlock(&nomount_write_mutex);
+
+    return ret;
+}
+
+static int nomount_genl_get_version(struct sk_buff *skb, struct genl_info *info)
+{
+    struct sk_buff *msg;
+    void *hdr;
+    int ret;
+
+    msg = genlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
+    if (!msg) return -ENOMEM;
+
+    hdr = genlmsg_put_reply(msg, info, &nomount_genl_family, 0, info->genlhdr->cmd);
+    if (!hdr) {
+        nlmsg_free(msg);
+        return -EMSGSIZE;
+    }
+
+    ret = nla_put_u32(msg, NOMOUNT_ATTR_VERSION, NOMOUNT_VERSION);
+    if (ret) {
+        genlmsg_cancel(msg, hdr);
+        nlmsg_free(msg);
+        return ret;
+    }
+
+    genlmsg_end(msg, hdr);
+    return genlmsg_reply(msg, info);
+}
+
+
+static const struct nla_policy nomount_genl_policy[NOMOUNT_ATTR_MAX + 1] = {
+    [NOMOUNT_ATTR_VIRTUAL_PATH] = { .type = NLA_NUL_STRING, .len = PATH_MAX },
+    [NOMOUNT_ATTR_REAL_PATH]    = { .type = NLA_NUL_STRING, .len = PATH_MAX },
+    [NOMOUNT_ATTR_FLAGS]        = { .type = NLA_U32 },
+    [NOMOUNT_ATTR_UID]          = { .type = NLA_U32 },
+    [NOMOUNT_ATTR_VERSION]      = { .type = NLA_U32 },
+    [NOMOUNT_ATTR_PAYLOAD]      = { .type = NLA_BINARY },
+};
+
+static const struct genl_ops nomount_genl_ops[] = {
+{ .cmd = NM_CMD_ADD_RULE, .flags = GENL_ADMIN_PERM, .doit = nomount_genl_add_rule, .dumpit = NULL, NM_OPS_POLICY(nomount_genl_policy) },
+{ .cmd = NM_CMD_DEL_RULE, .flags = GENL_ADMIN_PERM, .doit = nomount_genl_del_rule, .dumpit = NULL, NM_OPS_POLICY(nomount_genl_policy) },
+{ .cmd = NM_CMD_CLEAR_ALL, .flags = GENL_ADMIN_PERM, .doit = nomount_genl_clear_rules, .dumpit = NULL, NM_OPS_POLICY(nomount_genl_policy) },
+{ .cmd = NM_CMD_ADD_UID, .flags = GENL_ADMIN_PERM, .doit = nomount_genl_add_uid, .dumpit = NULL, NM_OPS_POLICY(nomount_genl_policy) },
+{ .cmd = NM_CMD_DEL_UID, .flags = GENL_ADMIN_PERM, .doit = nomount_genl_del_uid, .dumpit = NULL, NM_OPS_POLICY(nomount_genl_policy) },
+{ .cmd = NM_CMD_GET_LIST, .flags = GENL_ADMIN_PERM, .doit = NULL, .dumpit = nomount_genl_dump_rules, NM_OPS_POLICY(nomount_genl_policy) },
+{ .cmd = NM_CMD_GET_VERSION, .flags = GENL_ADMIN_PERM, .doit = nomount_genl_get_version, .dumpit = NULL, NM_OPS_POLICY(nomount_genl_policy) },
+};
+
+static struct genl_family nomount_genl_family = {
+    .name = NOMOUNT_GENL_NAME,
+    .version = NOMOUNT_GENL_VERSION,
+    .maxattr = NOMOUNT_ATTR_MAX,
+     NM_FAMILY_POLICY(nomount_genl_policy)
+    .netnsok = true,
+    .module = THIS_MODULE,
+    .ops = nomount_genl_ops,
+    .n_ops = ARRAY_SIZE(nomount_genl_ops),
 };
 
 static int __init nomount_init(void)
@@ -1371,9 +1469,9 @@ static int __init nomount_init(void)
         return -ENOMEM;
     }
 
-    ret = __nomount_add_rule("/dev/nomount", NULL, 12, 0, NM_FLAG_INTERNAL_API | NM_FLAG_HIDDEN);
+    ret = genl_register_family(&nomount_genl_family);
     if (ret) {
-        nm_err("Failed to register NoMount Internal API (err: %d)\n", ret);
+        nm_err("Failed to register Generic Netlink family (err: %d)\n", ret);
         kmem_cache_destroy(nm_dir_cachep);
         kmem_cache_destroy(nm_inode_cachep);
         put_cred(nm_root_cred);
@@ -1386,8 +1484,10 @@ static int __init nomount_init(void)
 
 static void __exit nomount_exit(void)
 {
+    genl_unregister_family(&nomount_genl_family);
+
     mutex_lock(&nomount_write_mutex);
-    __nomount_clear_all();
+    __nomount_clear_all(true);
     mutex_unlock(&nomount_write_mutex);
 
     kmem_cache_destroy(nm_dir_cachep);
