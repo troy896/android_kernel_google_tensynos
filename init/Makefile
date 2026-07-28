@@ -31,7 +31,7 @@ preempt-flag-$(CONFIG_PREEMPT_RT)	:= PREEMPT_RT
 #build-version = $(or $(KBUILD_BUILD_VERSION), $(build-version-auto))
 #build-timestamp = $(or $(KBUILD_BUILD_TIMESTAMP), $(build-timestamp-auto))
 build-version = 1
-build-timestamp = "Fri Jun 5 00:59:23 UTC 2026"
+build-timestamp = "Wed Jan 28 05:34:14 UTC 2026"
 
 # Maximum length of UTS_VERSION is 64 chars
 filechk_uts_version = \
