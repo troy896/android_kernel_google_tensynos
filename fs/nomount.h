@@ -24,9 +24,24 @@
 #define NM_FLAG_VIRTUAL_DIR (1 << 1)
 #define NM_FLAG_WHITEOUT    (1 << 2)
 
-/* logs */
+/* logs
+ *
+ * nm_debug is compiled OUT by default. The hijacked lookup path logs once per
+ * injected file, so a normal module set produced ~300 lines a boot, and the
+ * per-rule messages additionally spelled out every target -> backing mapping in
+ * the kernel ring buffer. Build with -DNOMOUNT_DEBUG to get them back.
+ * no_printk() keeps the format string and arguments type-checked (so the calls
+ * cannot rot) while generating no code. */
+#ifdef NOMOUNT_DEBUG
 #define nm_debug(fmt, ...) printk(KERN_DEBUG "NoMount: [DEBUG] " fmt, ##__VA_ARGS__)
-#define nm_info(fmt, ...) printk(KERN_INFO "NoMount: " fmt, ##__VA_ARGS__)
+#define nm_info(fmt, ...)  printk(KERN_INFO "NoMount: " fmt, ##__VA_ARGS__)
+#else
+/* Production: compile out the message strings entirely (no_printk still
+ * type-checks the format but the literal is dead-code-eliminated), so they do
+ * not sit in nomount.o naming functions/logic to anyone disassembling the image. */
+#define nm_debug(fmt, ...) no_printk("NoMount: [DEBUG] " fmt, ##__VA_ARGS__)
+#define nm_info(fmt, ...)  no_printk("NoMount: " fmt, ##__VA_ARGS__)
+#endif
 #define nm_warn(fmt, ...) printk(KERN_WARNING "NoMount: [WARN] " fmt, ##__VA_ARGS__)
 #define nm_err(fmt, ...)  printk(KERN_ERR "NoMount: [ERROR] " fmt, ##__VA_ARGS__)
 
@@ -45,8 +60,6 @@ static DEFINE_MUTEX(nomount_write_mutex);
 struct nm_iop {
     struct inode_operations fake_iop; /* MUST be exactly at offset 0 */
     const struct inode_operations *orig_iop;
-    struct dentry_operations fake_dop;
-    const struct dentry_operations *orig_dop;
     u64 signature;
     struct nomount_dir_node *dir_node;
     bool had_private_flag;
@@ -100,7 +113,6 @@ struct nomount_child_node {
 };
 
 struct nomount_dir_node {
-    struct rcu_head rcu;
     struct idr children_idr;
     u64 bloom_mask;
     union {
@@ -127,13 +139,6 @@ struct nomount_rule {
     char paths[]; 
 };
 
-struct nm_rule_info {
-    u32 flags;
-    unsigned long v_ino;
-    struct path r_path;
-    struct nomount_dir_node *this_dir;
-};
-
 /*** Operaction Vectors ***/
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 16, 0)
 static const struct file_operations nm_file_fops_mmap_prepare;
@@ -149,8 +154,20 @@ static int nomount_generate_virtual_topology(struct nomount_rule *target_rule);
 static struct nomount_rule *nm_alloc_rule(const char *v_path, const char *r_path, u16 v_len, u16 r_len, u32 flags, unsigned int target_uid);
 static void nm_free_rule(struct nomount_rule *rule);
 static void nm_detach_rule_locked(struct nomount_rule *rule, struct hlist_head *victims, bool prune);
+/* A lockless snapshot of the fields a reader needs from a rule, taken under RCU
+ * by nomount_get_rule_info(). The r_path (if any) is path_get()'d into the
+ * snapshot, so the caller can use it safely even if the rule is freed
+ * concurrently, and MUST path_put() it when done. This replaces returning a bare
+ * rule pointer that lockless readers then dereferenced after rcu_read_unlock()
+ * -- a use-after-free if a concurrent nm del/clear/COW freed the rule. */
+struct nm_rule_info {
+    u32 flags;
+    unsigned long v_ino;
+    struct path r_path;
+    struct nomount_dir_node *this_dir;
+};
+
 static struct inode *nomount_create_new_inode(struct super_block *virtual_sb, struct nm_rule_info *rule_info);
-static void nomount_hijack_dentry_ops(struct dentry *dentry, struct nm_iop *nm_iop);
 
 /* =====================================================================
  * NoMount VFS Offset Protocol
@@ -300,5 +317,21 @@ static inline int nm_call_iterate(struct file *file, struct dir_context *ctx, co
 #else
     #define nm_init_private_list(inode) INIT_LIST_HEAD(&(inode)->i_data.private_list);
 #endif
+
+/* Install our dentry ops on a dentry we manage. Setting d_op alone is NOT enough:
+ * a dentry allocated on a hijacked sb (e.g. overlayfs, whose s_d_op is
+ * ovl_dentry_operations) already has the sb's DCACHE_OP_* flags set, so the VFS
+ * would keep calling ops (d_weak_revalidate/d_real/d_release/...) that nm_dops
+ * does not provide -> NULL deref (seen as an OOPS in path_lookupat when resolving
+ * '..' of a synthesized virtual dir). Clear the inherited op flags and set only
+ * the ones nm_dops actually implements (d_revalidate). */
+static inline void nm_install_dentry_ops(struct dentry *dentry)
+{
+    dentry->d_flags &= ~(DCACHE_OP_HASH | DCACHE_OP_COMPARE |
+                         DCACHE_OP_REVALIDATE | DCACHE_OP_WEAK_REVALIDATE |
+                         DCACHE_OP_DELETE | DCACHE_OP_PRUNE | DCACHE_OP_REAL);
+    dentry->d_op = &nm_dops;
+    dentry->d_flags |= DCACHE_OP_REVALIDATE;
+}
 
 #endif /* _LINUX_NOMOUNT_H */
