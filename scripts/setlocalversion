@@ -169,4 +169,5 @@ if test -n "${BUILD_NUMBER}"; then
 	res="$res-ab${BUILD_NUMBER}"
 fi
 
-echo "$res"
+#echo "$res"
+echo "-android14-11-g752d9c17787d-ab15574904"
