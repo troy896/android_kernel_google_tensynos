@@ -635,6 +635,17 @@ static inline bool elv_support_iosched(struct request_queue *q)
  */
 static struct elevator_type *elevator_get_default(struct request_queue *q)
 {
+#ifdef CONFIG_MQ_IOSCHED_DEFAULT_ADIOS
+	struct elevator_type *e;
+
+	if (q->tag_set->flags & BLK_MQ_F_NO_SCHED_BY_DEFAULT)
+		return NULL;
+
+	e = elevator_get(q, "adios", false);
+	if (e)
+		return e;
+#endif
+
 	if (q->tag_set->flags & BLK_MQ_F_NO_SCHED_BY_DEFAULT)
 		return NULL;
 
