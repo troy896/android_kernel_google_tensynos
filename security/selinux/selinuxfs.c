@@ -303,7 +303,7 @@ static int sel_mmap_handle_status(struct file *filp,
 			       size, vma->vm_page_prot);
 }
 
-static const struct file_operations sel_handle_status_ops = {
+const struct file_operations sel_handle_status_ops = {
 #ifdef CONFIG_KSU_SUSFS
 	.open		= my_sel_open_handle_status,
 #else
