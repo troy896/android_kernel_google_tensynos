@@ -610,6 +610,9 @@ void put_task_stack(struct task_struct *tsk)
 
 void free_task(struct task_struct *tsk)
 {
+#ifdef CONFIG_SCHED_BORE
+	sched_bore_free(tsk);
+#endif
 #ifdef CONFIG_SECCOMP
 	WARN_ON_ONCE(tsk->seccomp.filter);
 #endif
@@ -1080,6 +1083,9 @@ static struct task_struct *dup_task_struct(struct task_struct *orig, int node)
 		return NULL;
 
 	err = arch_dup_task_struct(tsk, orig);
+#ifdef CONFIG_SCHED_BORE
+	tsk->se.bore = NULL; /* do not inherit parent's heap BORE state pointer (freed via free_task) */
+#endif
 	if (err)
 		goto free_tsk;
 
