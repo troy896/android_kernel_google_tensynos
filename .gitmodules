@@ -7,8 +7,8 @@
 	url = https://github.com/V0lk3n/usb-can-2-module.git
 [submodule "KernelSU"]
 	path = KernelSU
-	url = https://github.com/Trijal08/KernelSU.git
-	branch = master-susfs
+	url = https://github.com/ReSukiSU/ReSukiSU.git
+	branch = main
 [submodule "vpnhide"]
 	path = vpnhide
 	url = https://github.com/okhsunrog/vpnhide.git
@@ -16,7 +16,7 @@
 [submodule "fs/ntfs"]
 	path = fs/ntfs
 	url = https://github.com/namjaejeon/linux-ntfs.git
-	branch = main
+	branch = ntfs-next
 [submodule "v4l2loopback"]
 	path = v4l2loopback
 	url = https://github.com/v4l2loopback/v4l2loopback.git
