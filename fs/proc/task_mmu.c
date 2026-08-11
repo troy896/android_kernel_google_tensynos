@@ -420,12 +420,30 @@ static int show_vma_header_prefix(struct seq_file *m, unsigned long start,
 	return 0;
 }
 
+static void show_vma_header_prefix_fake(struct seq_file *m,
+					unsigned long start, unsigned long end,
+					vm_flags_t flags, unsigned long long pgoff,
+					dev_t dev, unsigned long ino)
+{
+	seq_setwidth(m, 25 + sizeof(void *) * 6 - 1);
+	seq_printf(m, "%08lx-%08lx %c%c%c%c %08llx %02x:%02x %lu ",
+			start,
+			end,
+			flags & VM_READ ? 'r' : '-',
+			flags & VM_WRITE ? 'w' : '-',
+			flags & VM_EXEC ? '-' : '-',
+			flags & VM_MAYSHARE ? 's' : 'p',
+			pgoff,
+			MAJOR(dev), MINOR(dev), ino);
+}
+
 #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 extern void susfs_sus_kstat_spoof_show_map_vma(struct inode *inode, dev_t *out_dev, unsigned long *out_ino);
 #endif // #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
 #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 extern int susfs_open_redirect_spoof_show_map_vma(struct inode *inode, unsigned long *out_ino, dev_t *out_dev, char *spoofed_name);
 #endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+
 
 static void
 show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
@@ -466,6 +484,7 @@ show_map_vma(struct seq_file *m, struct vm_area_struct *vma)
 #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 orig_flow:
 #endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+	struct dentry *dentry;
 
 	start = vma->vm_start;
 	end = VMA_PAD_START(vma);
@@ -487,6 +506,23 @@ orig_flow:
 	}
 #endif // #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
 
+		dentry = file->f_path.dentry;
+        if (dentry) {
+        	const char *path = (const char *)dentry->d_name.name; 
+            if (strstr(path, "lineage")) {
+			start = vma->vm_start;
+			end = vma->vm_end;
+			show_vma_header_prefix(m, start, end, flags, pgoff, dev, ino);
+			name = "/system/framework/framework-res.apk";
+			goto done;
+            }
+			if (strstr(path, "jit-zygote-cache")) { 
+			start = vma->vm_start;
+			end = vma->vm_end;
+			show_vma_header_prefix_fake(m, start, end, flags, pgoff, dev, ino);
+			goto bypass;
+            }
+        }
 	if (file) {
 		char *buf;
 		size_t size = seq_get_buf(m, &buf);
@@ -673,6 +709,7 @@ static void smaps_account(struct mem_size_stats *mss, struct page *page,
 	int i, nr = compound ? compound_nr(page) : 1;
 	unsigned long size = nr * PAGE_SIZE;
 
+	bypass:
 	/*
 	 * First accumulate quantities that depend only on |size| and the type
 	 * of the compound page.
